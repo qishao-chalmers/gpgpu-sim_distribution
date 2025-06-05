@@ -3543,12 +3543,12 @@ unsigned int shader_core_config::max_cta(const kernel_info_t &k) const {
   if (last_kinfo !=
       kernel_info) {  // Only print out stats if kernel_info struct changes
     last_kinfo = kernel_info;
-    printf("GPGPU-Sim uArch: CTA/core = %u, limited by:", result);
-    if (result == result_thread) printf(" threads");
-    if (result == result_shmem) printf(" shmem");
-    if (result == result_regs) printf(" regs");
-    if (result == result_cta) printf(" cta_limit");
-    printf("\n");
+    //printf("GPGPU-Sim uArch: CTA/core = %u, limited by:", result);
+    //if (result == result_thread) printf(" threads");
+    //if (result == result_shmem) printf(" shmem");
+    //if (result == result_regs) printf(" regs");
+    //if (result == result_cta) printf(" cta_limit");
+    //printf("\n");
   }
 
   // gpu_max_cta_per_shader is limited by number of CTAs if not enough to keep
@@ -4457,6 +4457,10 @@ void exec_simt_core_cluster::create_shader_core_ctx() {
                                          m_config, m_mem_config, m_stats);
     m_core_sim_order.push_back(i);
   }
+  std::cout << "Created " << m_config->n_simt_cores_per_cluster
+            << " shader cores in cluster " << m_cluster_id
+            << " simt cores per cluster" << m_config->n_simt_cores_per_cluster
+            << std::endl;
 }
 
 simt_core_cluster::simt_core_cluster(class gpgpu_sim *gpu, unsigned cluster_id,
@@ -4540,8 +4544,25 @@ unsigned simt_core_cluster::issue_block2core() {
         (i + m_cta_issue_next_core + 1) % m_config->n_simt_cores_per_cluster;
 
     kernel_info_t *kernel;
-    // Jin: fetch kernel according to concurrent kernel setting
-    if (m_config->gpgpu_concurrent_kernel_sm) {  // concurrent kernel on sm
+    if (m_config->gpgpu_stream_partitioning) {
+      // first select core kernel, if no more cta, get a new kernel
+      // only when core completes
+      kernel = m_core[core]->get_kernel();
+      if (!m_gpu->kernel_more_cta_left(kernel)) {
+        // wait till current kernel finishes
+        if (m_core[core]->get_not_completed() == 0) {
+          kernel_info_t *k = m_gpu->select_kernel(m_core[core]->get_sid());
+          if (k) {
+            //printf("Selecting kernel %s streamId %d for core %u sid %d\n",
+            //     k ? k->name().c_str() : "NULL", k->get_streamID(),core,
+            //     m_core[core]->get_sid());
+            m_core[core]->set_kernel(k);
+          }
+          kernel = k;
+        }
+      }
+    } else if (m_config->gpgpu_concurrent_kernel_sm) {  // concurrent kernel on sm
+      // Jin: fetch kernel according to concurrent kernel setting
       // always select latest issued kernel
       kernel_info_t *k = m_gpu->select_kernel();
       kernel = k;
@@ -4562,8 +4583,10 @@ unsigned simt_core_cluster::issue_block2core() {
     if (m_gpu->kernel_more_cta_left(kernel) &&
         //            (m_core[core]->get_n_active_cta() <
         //            m_config->max_cta(*kernel)) ) {
-        m_core[core]->can_issue_1block(*kernel)) {
+      m_core[core]->can_issue_1block(*kernel)) {
       m_core[core]->issue_block2core(*kernel);
+      //printf("Issuing block to core %u, kernel %s, streamId %d\n", core,
+      //       kernel->name().c_str(),kernel->get_streamID());
       num_blocks_issued++;
       m_cta_issue_next_core = core;
       break;

@@ -93,6 +93,16 @@ memory_partition_unit::memory_partition_unit(unsigned partition_id,
     m_sub_partition[p] =
         new memory_sub_partition(sub_partition_id, m_config, stats, gpu);
   }
+
+  // print out the memory partition unit configuration for memory and cache
+  if (m_config->gpgpu_memlatency_stat) {
+    fprintf(stdout, "Memory Partition Unit %u Configuration:\n", m_id);
+    m_dram->print_stat(stdout);
+    for (unsigned p = 0; p < m_config->m_n_sub_partition_per_memory_channel;
+         p++) {
+      m_sub_partition[p]->print(stdout);
+    }
+  }
 }
 
 void memory_partition_unit::handle_memcpy_to_gpu(
@@ -435,10 +445,11 @@ memory_sub_partition::memory_sub_partition(unsigned sub_partition_id,
   m_L2interface = new L2interface(this);
   m_mf_allocator = new partition_mf_allocator(config);
 
-  if (!m_config->m_L2_config.disabled())
+  if (!m_config->m_L2_config.disabled()) {
     m_L2cache = new l2_cache(L2c_name, m_config->m_L2_config, -1, -1,
                              m_L2interface, m_mf_allocator,
                              IN_PARTITION_L2_MISS_QUEUE, gpu, L2_GPU_CACHE);
+  }
 
   unsigned int icnt_L2;
   unsigned int L2_dram;
@@ -514,8 +525,46 @@ void memory_sub_partition::cache_cycle(unsigned cycle) {
   if (!m_config->m_L2_config.disabled()) m_L2cache->cycle();
 
   // new L2 texture accesses and/or non-texture accesses
-  if (!m_L2_dram_queue->full() && !m_icnt_L2_queue->empty()) {
-    mem_fetch *mf = m_icnt_L2_queue->top();
+
+  bool picked_l2_delayed_queue = false;
+  bool picked_icnt_l2_queue = false;
+
+  mem_fetch *mf = nullptr;
+  // L2 delayed queue
+  if (!m_l2_delayed_queue.empty()) {
+    mf = m_l2_delayed_queue.front();
+    if (!m_L2cache->stream_reserved_exceeds_allocation(mf->get_addr(), mf->get_streamID())) {
+      picked_l2_delayed_queue = true;
+      //printf("pick mf from delayed queue: %p, addr: %llx, streamID: %llu\n",
+      //       mf, mf->get_addr(), mf->get_streamID());
+    } else {
+      //printf("Not pick mf from delayed queue: %p, addr: %llx, streamID: %llu for reserved lines\n",
+      //mf, mf->get_addr(), mf->get_streamID());
+      mf = nullptr;
+    }
+  }
+  if (!picked_l2_delayed_queue && !m_icnt_L2_queue->empty()) {
+    mf = m_icnt_L2_queue->top();
+    // check if the stream is reserved exceeds allocation
+    if (m_config->gpgpu_cache_stream_partitioning) {
+      if (m_L2cache->stream_reserved_exceeds_allocation(mf->get_addr(), mf->get_streamID())) {
+        m_icnt_L2_queue->pop();
+        m_l2_delayed_queue.push(mf);
+        picked_icnt_l2_queue = false;
+        mf = nullptr;
+        //printf("Not pick mf from inct_l2_queue queue: %p, addr: %llx, streamID: %llu for reserved lines\n",
+        //mf, mf->get_addr(), mf->get_streamID());
+      } else {
+        //printf("pick mf from inct_l2_queue queue: %p, addr: %llx, streamID: %llu\n",
+        //mf, mf->get_addr(), mf->get_streamID());
+        picked_icnt_l2_queue = true;
+      }
+    } else{
+      picked_icnt_l2_queue = true;
+    }
+  }
+
+  if (!m_L2_dram_queue->full() && mf) {
     if (!m_config->m_L2_config.disabled() &&
         ((m_config->m_L2_texure_only && mf->istexture()) ||
          (!m_config->m_L2_texure_only))) {
@@ -547,10 +596,22 @@ void memory_sub_partition::cache_cycle(unsigned cycle) {
                              m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);
               m_L2_icnt_queue->push(mf);
             }
-            m_icnt_L2_queue->pop();
+            if (picked_icnt_l2_queue) {
+              m_icnt_L2_queue->pop();
+            } else if (picked_l2_delayed_queue) {
+              m_l2_delayed_queue.pop();
+            } else {
+              assert(false && "nothing picked");
+            }
           } else {
             assert(write_sent);
-            m_icnt_L2_queue->pop();
+            if (picked_icnt_l2_queue) {
+              m_icnt_L2_queue->pop();
+            } else if (picked_l2_delayed_queue) {
+              m_l2_delayed_queue.pop();
+            } else {
+              assert(false && "nothing picked");
+            }
           }
         } else if (status != RESERVATION_FAIL) {
           if (mf->is_write() &&
@@ -569,7 +630,13 @@ void memory_sub_partition::cache_cycle(unsigned cycle) {
             }
           }
           // L2 cache accepted request
-          m_icnt_L2_queue->pop();
+          if (picked_icnt_l2_queue) {
+            m_icnt_L2_queue->pop();
+          } else if (picked_l2_delayed_queue) {
+              m_l2_delayed_queue.pop();
+          } else {
+              assert(false && "nothing picked");
+          }
         } else {
           assert(!write_sent);
           assert(!read_sent);
@@ -638,7 +705,10 @@ void memory_sub_partition::print(FILE *fp) const {
         fprintf(fp, " <NULL mem_fetch?>\n");
     }
   }
-  if (!m_config->m_L2_config.disabled()) m_L2cache->display_state(fp);
+  if (!m_config->m_L2_config.disabled()) {
+    m_L2cache->display_state(fp);
+    m_config->m_L2_config.print(fp);
+  }
 }
 
 void memory_stats_t::visualizer_print(gzFile visualizer_file) {

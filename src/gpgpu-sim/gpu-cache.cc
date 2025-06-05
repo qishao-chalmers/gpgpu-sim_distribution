@@ -200,6 +200,22 @@ tag_array::tag_array(cache_config &config, int core_id, int type_id)
     assert(0);
 
   init(core_id, type_id);
+
+  // Stream partitioning configuration
+  if (config.is_stream_partitioning_enabled()) {
+    m_stream_partitioning_enabled = true;
+    m_stream_allocations = config.m_stream_allocations;
+    for (auto &entry : m_stream_allocations) {
+      unsigned long long streamID = entry.first;
+      float percentage = entry.second;
+      set_stream_allocation(streamID, percentage);
+    }
+
+    printf("stream 0/1 way number: %llu/%llu\n",
+           stream0_wayNum, stream1_wayNum);
+  } else {
+    m_stream_partitioning_enabled = false;
+  }
 }
 
 void tag_array::init(int core_id, int type_id) {
@@ -243,6 +259,23 @@ enum cache_request_status tag_array::probe(new_addr_type addr, unsigned &idx,
   return probe(addr, idx, mask, is_write, probe_mode, mf);
 }
 
+bool tag_array::stream_reserved_exceeds_allocation(new_addr_type addr, unsigned long long streamID) const {
+  unsigned max_ways = streamID == 0 ? stream0_wayNum : stream1_wayNum;
+  unsigned set_index = m_config.set_index(addr);
+  unsigned reserved_count = 0;
+  for (unsigned way = 0; way < m_config.m_assoc; way++) {
+    unsigned index = set_index * m_config.m_assoc + way;
+    cache_block_t *line = m_lines[index];
+    if (line->m_stream_id == streamID && line->is_reserved_line()) {
+      reserved_count++;
+      if (reserved_count >= max_ways) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 enum cache_request_status tag_array::probe(new_addr_type addr, unsigned &idx,
                                            mem_access_sector_mask_t mask,
                                            bool is_write, bool probe_mode,
@@ -254,7 +287,8 @@ enum cache_request_status tag_array::probe(new_addr_type addr, unsigned &idx,
   unsigned invalid_line = (unsigned)-1;
   unsigned valid_line = (unsigned)-1;
   unsigned long long valid_timestamp = (unsigned)-1;
-
+  unsigned long long streamID = mf ? mf->get_streamID() : 0;
+  
   bool all_reserved = true;
   // check for hit or pending hit
   for (unsigned way = 0; way < m_config.m_assoc; way++) {
@@ -321,13 +355,98 @@ enum cache_request_status tag_array::probe(new_addr_type addr, unsigned &idx,
                               // on miss
   }
 
-  if (invalid_line != (unsigned)-1) {
-    idx = invalid_line;
-  } else if (valid_line != (unsigned)-1) {
-    idx = valid_line;
-  } else
-    abort();  // if an unreserved block exists, it is either invalid or
-              // replaceable
+  if (m_config.is_stream_partitioning_enabled()) {
+    if (stream_exceeds_allocation(set_index, streamID)) {
+        // Find LRU/FIFO victim within the same stream
+        unsigned stream_victim = (unsigned)-1;
+        unsigned long long stream_victim_time = (unsigned)-1;
+        
+        for (unsigned way = 0; way < m_config.m_assoc; way++) {
+          unsigned index = set_index * m_config.m_assoc + way;
+          cache_block_t *line = m_lines[index];
+          
+          if (!line->is_reserved_line() && line->m_stream_id == streamID) {
+            if (m_config.m_replacement_policy == LRU) {
+              if (line->get_last_access_time() < stream_victim_time) {
+                stream_victim_time = line->get_last_access_time();
+                stream_victim = index;
+              }
+            } else if (m_config.m_replacement_policy == FIFO) {
+              if (line->get_alloc_time() < stream_victim_time) {
+                stream_victim_time = line->get_alloc_time();
+                stream_victim = index;
+              } 
+            }
+          }
+
+          //printf("#### streamID: %llu, index %d line->m_stream_id: %llu, "
+          //      "line reserved/modified/valid: %d/%d/%d, last_access: %llu\n",
+          //      streamID, index, line->m_stream_id, line->is_reserved_line(),
+          //      line->is_modified_line(), line->is_valid_line(),
+          //      line->get_last_access_time());
+        }
+
+        idx = stream_victim;
+        
+        if (stream_victim == (unsigned)-1) {
+          for (unsigned way = 0; way < m_config.m_assoc; way++) {
+            unsigned index = set_index * m_config.m_assoc + way;
+            cache_block_t *line = m_lines[index];
+
+            //printf("## addr %0#x streamID: %llu, index %llu line->m_stream_id: %llu, "
+            //      "reserved: %d, last_access: %llu\n",
+            //      addr, streamID, index, line->m_stream_id,
+            //      line->is_reserved_line(), line->get_last_access_time());
+          }
+          return RESERVATION_FAIL;  // no enough ways reserved for the stream
+        }
+    } else if (invalid_line != (unsigned)-1){
+      idx = invalid_line;
+      
+      for (unsigned way = 0; way < m_config.m_assoc; way++) {
+          if (set_index != 7)
+            continue;
+          unsigned index = set_index * m_config.m_assoc + way;
+          cache_block_t *line = m_lines[index];
+          
+          printf("#### addr %0#x streamID: %llu, invalid %d line->m_stream_id: %llu, index %llu "
+                "line reserved/modified/valid: %d/%d/%d, last_access: %llu stream way num %d cycle %llu\n",
+                addr, streamID, invalid_line, line->m_stream_id, index, line->is_reserved_line(),
+                line->is_modified_line(), line->is_valid_line(),
+                line->get_last_access_time(), get_stream_wayNum(streamID), 
+                gpu->gpu_tot_sim_cycle+gpu->gpu_sim_cycle);
+        
+      }
+            
+    } else {
+        
+        for (unsigned way = 0; way < m_config.m_assoc; way++) {
+          unsigned index = set_index * m_config.m_assoc + way;
+          cache_block_t *line = m_lines[index];
+
+          printf("#### addr %0#x streamID: %llu, line->m_stream_id: %llu, index %llu "
+                "line reserved/modified/valid: %d/%d/%d, last_access: %llu\n",
+                addr, streamID, line->m_stream_id, index, line->is_reserved_line(),
+                line->is_modified_line(), line->is_valid_line(),
+                line->get_last_access_time());
+        }
+        
+        
+        // just hack
+        abort();  // if an unreserved block exists, it is either invalid or
+                  // replaceable
+        //idx = valid_line;
+    }
+
+  } else {
+      if (invalid_line != (unsigned)-1) {
+        idx = invalid_line;
+      } else if (valid_line != (unsigned)-1) {
+        idx = valid_line;
+      } else
+        abort();  // if an unreserved block exists, it is either invalid or
+                  // replaceable
+  }
 
   return MISS;
 }
@@ -370,6 +489,11 @@ enum cache_request_status tag_array::access(new_addr_type addr, unsigned time,
         }
         m_lines[idx]->allocate(m_config.tag(addr), m_config.block_addr(addr),
                                time, mf->get_access_sector_mask());
+        
+        // Set stream ID for the allocated line
+        if (mf) {
+          m_lines[idx]->m_stream_id = mf->get_streamID();
+        }
       }
       break;
     case SECTOR_MISS:
@@ -380,6 +504,11 @@ enum cache_request_status tag_array::access(new_addr_type addr, unsigned time,
         bool before = m_lines[idx]->is_modified_line();
         ((sector_cache_block *)m_lines[idx])
             ->allocate_sector(time, mf->get_access_sector_mask());
+
+        // Set stream ID for the allocated line
+        if (mf) {
+          m_lines[idx]->m_stream_id = mf->get_streamID();
+        }
         if (before && !m_lines[idx]->is_modified_line()) {
           m_dirty--;
         }
@@ -402,12 +531,13 @@ enum cache_request_status tag_array::access(new_addr_type addr, unsigned time,
 void tag_array::fill(new_addr_type addr, unsigned time, mem_fetch *mf,
                      bool is_write) {
   fill(addr, time, mf->get_access_sector_mask(), mf->get_access_byte_mask(),
-       is_write);
+       is_write, mf->get_streamID());
 }
 
 void tag_array::fill(new_addr_type addr, unsigned time,
                      mem_access_sector_mask_t mask,
-                     mem_access_byte_mask_t byte_mask, bool is_write) {
+                     mem_access_byte_mask_t byte_mask, bool is_write,
+                    unsigned long long m_stream_id) {
   // assert( m_config.m_alloc_policy == ON_FILL );
   unsigned idx;
   enum cache_request_status status = probe(addr, idx, mask, is_write);
@@ -434,6 +564,8 @@ void tag_array::fill(new_addr_type addr, unsigned time,
   if (m_lines[idx]->is_modified_line() && !before) {
     m_dirty++;
   }
+
+  m_lines[idx]->m_stream_id = m_stream_id;
 }
 
 void tag_array::fill(unsigned index, unsigned time, mem_fetch *mf) {
@@ -444,6 +576,7 @@ void tag_array::fill(unsigned index, unsigned time, mem_fetch *mf) {
   if (m_lines[index]->is_modified_line() && !before) {
     m_dirty++;
   }
+  m_lines[index]->m_stream_id = mf->get_streamID();
 }
 
 // TODO: we need write back the flushed data to the upper level
@@ -510,6 +643,68 @@ void tag_array::get_stats(unsigned &total_access, unsigned &total_misses,
   total_misses = (m_miss + m_sector_miss);
   total_hit_res = m_pending_hit;
   total_res_fail = m_res_fail;
+}
+
+
+
+void tag_array::enable_stream_partitioning() {
+  m_stream_partitioning_enabled = true;
+}
+  
+void tag_array::set_stream_allocation(unsigned long long streamID, float percentage) {
+  if (percentage >= 0.0f && percentage <= 1.0f) {
+    m_stream_allocations[streamID] = percentage;
+    if (streamID == 0) {
+      stream0_wayNum = (unsigned)(m_config.m_assoc * percentage);
+      stream1_wayNum = m_config.m_assoc - stream0_wayNum;
+    } else if (streamID == 1) {
+      stream1_wayNum = (unsigned)(m_config.m_assoc * percentage);
+      stream0_wayNum = m_config.m_assoc - stream1_wayNum;
+    }
+  }
+}
+  
+float tag_array::get_stream_allocation(unsigned long long streamID) const {
+  auto it = m_stream_allocations.find(streamID);
+  return (it != m_stream_allocations.end()) ? it->second : 0.0f;
+}
+
+bool tag_array::is_stream_partitioning_enabled() const {
+  return m_stream_partitioning_enabled;
+}
+
+
+unsigned tag_array::count_stream_ways_in_set(unsigned set_index, unsigned long long streamID) const {
+  unsigned count = 0;
+  for (unsigned way = 0; way < m_config.m_assoc; way++) {
+    unsigned index = set_index * m_config.m_assoc + way;
+    if (m_lines[index]->is_valid_line() && m_lines[index]->m_stream_id == streamID) {
+      count++;
+    }
+  }
+  return count;
+}
+
+bool tag_array::stream_exceeds_allocation(unsigned set_index, unsigned long long streamID) const {
+  if (!m_stream_partitioning_enabled) {
+    return false;
+  }
+  unsigned max_ways = streamID == 0 ? stream0_wayNum : stream1_wayNum;
+  unsigned current_ways = 0;
+  
+  for (unsigned way = 0; way < m_config.m_assoc; way++) {
+    unsigned index = set_index * m_config.m_assoc + way;
+    if ((m_lines[index]->is_valid_line() || m_lines[index]->is_reserved_line())
+      && m_lines[index]->m_stream_id == streamID) {
+      current_ways++;
+      if (current_ways >= max_ways) {
+        // If we already exceed the maximum ways, no need to continue checking
+        return true;
+      }
+    }
+  }
+  
+  return false;
 }
 
 bool was_write_sent(const std::list<cache_event> &events) {
@@ -1992,6 +2187,10 @@ enum cache_request_status data_cache::access(new_addr_type addr, mem_fetch *mf,
                        m_stats.select_stats_status(probe_status, access_status),
                        mf->get_streamID());
   return access_status;
+}
+
+bool data_cache::stream_reserved_exceeds_allocation(new_addr_type addr, unsigned long long streamID) const {
+  return m_tag_array->stream_reserved_exceeds_allocation(addr, streamID);
 }
 
 /// This is meant to model the first level data cache in Fermi.

@@ -1707,6 +1707,9 @@ class shader_core_config : public core_config {
   // Jin: concurrent kernel on sm
   bool gpgpu_concurrent_kernel_sm;
 
+  bool gpgpu_stream_partitioning;
+
+
   bool perfect_inst_const_cache;
   unsigned inst_fetch_throughput;
   unsigned reg_file_port_throughput;
@@ -2080,8 +2083,8 @@ class shader_core_ctx : public core_t {
     assert(k);
     m_kernel = k;
     //        k->inc_running();
-    printf("GPGPU-Sim uArch: Shader %d bind to kernel %u \'%s\'\n", m_sid,
-           m_kernel->get_uid(), m_kernel->name().c_str());
+    printf("GPGPU-Sim uArch: Shader %d shader ID %d bind to kernel %u \'%s\'\n", m_sid,
+           m_kernel->get_uid(), m_sid, m_kernel->name().c_str());
   }
   PowerscalingCoefficients *scaling_coeffs;
   // accessors
@@ -2097,6 +2100,7 @@ class shader_core_ctx : public core_t {
   }
   kernel_info_t *get_kernel() { return m_kernel; }
   unsigned get_sid() const { return m_sid; }
+  unsigned get_tpc() const { return m_tpc; }
 
   // used by functional simulation:
   // modifiers

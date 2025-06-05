@@ -126,6 +126,7 @@ struct cache_block_t {
   cache_block_t() {
     m_tag = 0;
     m_block_addr = 0;
+    m_stream_id = (unsigned long long) -1; // Default stream ID
   }
 
   virtual void allocate(new_addr_type tag, new_addr_type block_addr,
@@ -133,6 +134,10 @@ struct cache_block_t {
                         mem_access_sector_mask_t sector_mask) = 0;
   virtual void fill(unsigned time, mem_access_sector_mask_t sector_mask,
                     mem_access_byte_mask_t byte_mask) = 0;
+
+  virtual void reset_stream_id() {
+    m_stream_id = (unsigned long long) -1; // Reset to default stream ID
+  }
 
   virtual bool is_invalid_line() = 0;
   virtual bool is_valid_line() = 0;
@@ -167,6 +172,7 @@ struct cache_block_t {
 
   new_addr_type m_tag;
   new_addr_type m_block_addr;
+  unsigned long long m_stream_id; // Stream ID that owns this cache line
 };
 
 struct line_cache_block : public cache_block_t {
@@ -217,6 +223,9 @@ struct line_cache_block : public cache_block_t {
   virtual void set_status(enum cache_block_state status,
                           mem_access_sector_mask_t sector_mask) {
     m_status = status;
+    if (status == INVALID) {
+      reset_stream_id();  // Reset stream ID when block is invalidated
+    }
   }
   virtual void set_byte_mask(mem_fetch *mf) {
     m_dirty_byte_mask = m_dirty_byte_mask | mf->get_access_byte_mask();
@@ -411,6 +420,9 @@ struct sector_cache_block : public cache_block_t {
                           mem_access_sector_mask_t sector_mask) {
     unsigned sidx = get_sector_index(sector_mask);
     m_status[sidx] = status;
+    if (status == INVALID) {
+      reset_stream_id();  // Reset stream ID when block is invalidated
+    }
   }
 
   virtual void set_byte_mask(mem_fetch *mf) {
@@ -565,9 +577,13 @@ class cache_config {
     m_set_index_function = LINEAR_SET_FUNCTION;
     m_is_streaming = false;
     m_wr_percent = 0;
+
+    // Stream partitioning configuration
+    m_stream_partitioning_enabled = false;
   }
   void init(char *config, FuncCache status) {
     cache_status = status;
+
     assert(config);
     char ct, rp, wp, ap, mshr_type, wap, sif;
 
@@ -846,6 +862,26 @@ class cache_config {
     return m_write_alloc_policy;
   }
   write_policy_t get_write_policy() { return m_write_policy; }
+    
+  void enable_stream_partitioning() {
+    m_stream_partitioning_enabled = true;
+  }
+  
+  void set_stream_allocation(unsigned long long streamID, float percentage) {
+    if (percentage >= 0.0f && percentage <= 1.0f) {
+      m_stream_allocations[streamID] = percentage;
+      m_stream_partitioning_enabled = true;
+    }
+  }
+  
+  float get_stream_allocation(unsigned long long streamID) const {
+    auto it = m_stream_allocations.find(streamID);
+    return (it != m_stream_allocations.end()) ? it->second : 0.0f;
+  }
+  
+  bool is_stream_partitioning_enabled() const {
+    return m_stream_partitioning_enabled;
+  }
 
  protected:
   void exit_parse_error() {
@@ -902,6 +938,11 @@ class cache_config {
   friend class l1_cache;
   friend class l2_cache;
   friend class memory_sub_partition;
+
+    
+  // Stream partitioning configuration
+  bool m_stream_partitioning_enabled;
+  std::map<unsigned long long, float> m_stream_allocations; // streamID -> percentage (0.0-1.0)
 };
 
 class l1d_cache_config : public cache_config {
@@ -956,6 +997,8 @@ class tag_array {
                                   mem_access_sector_mask_t mask, bool is_write,
                                   bool probe_mode = false,
                                   mem_fetch *mf = NULL) const;
+  bool stream_reserved_exceeds_allocation(new_addr_type addr,
+                                  unsigned long long streamID) const;
   enum cache_request_status access(new_addr_type addr, unsigned time,
                                    unsigned &idx, mem_fetch *mf);
   enum cache_request_status access(new_addr_type addr, unsigned time,
@@ -965,7 +1008,8 @@ class tag_array {
   void fill(new_addr_type addr, unsigned time, mem_fetch *mf, bool is_write);
   void fill(unsigned idx, unsigned time, mem_fetch *mf);
   void fill(new_addr_type addr, unsigned time, mem_access_sector_mask_t mask,
-            mem_access_byte_mask_t byte_mask, bool is_write);
+            mem_access_byte_mask_t byte_mask, bool is_write,
+            unsigned long long streamID = 0);
 
   unsigned size() const { return m_config.get_num_lines(); }
   cache_block_t *get_block(unsigned idx) { return m_lines[idx]; }
@@ -984,6 +1028,25 @@ class tag_array {
   void add_pending_line(mem_fetch *mf);
   void remove_pending_line(mem_fetch *mf);
   void inc_dirty() { m_dirty++; }
+
+  // Stream-aware allocation helper
+  void enable_stream_partitioning();
+
+  void set_stream_allocation(unsigned long long streamID, float percentage);
+  
+  float get_stream_allocation(unsigned long long streamID) const;
+  
+  bool is_stream_partitioning_enabled() const;
+
+  unsigned count_stream_ways_in_set(unsigned set_index, unsigned long long streamID) const;
+
+  unsigned get_stream_wayNum(unsigned long long streamID) const {
+    return (streamID == 0) ? stream0_wayNum : stream1_wayNum;
+  }
+  
+  bool stream_exceeds_allocation(unsigned set_index, unsigned long long streamID) const;
+
+  void set_gpu(gpgpu_sim *gpu_) { gpu = gpu_; }
 
  protected:
   // This constructor is intended for use only from derived classes that wish to
@@ -1006,6 +1069,13 @@ class tag_array {
   unsigned m_sector_miss;
   unsigned m_dirty;
 
+    // Stream partitioning configuration
+  bool m_stream_partitioning_enabled;
+  std::map<unsigned long long, float> m_stream_allocations; // streamID -> percentage (0.0-1.0)
+
+  unsigned stream0_wayNum;
+  unsigned stream1_wayNum;
+
   // performance counters for calculating the amount of misses within a time
   // window
   unsigned m_prev_snapshot_access;
@@ -1019,6 +1089,8 @@ class tag_array {
 
   typedef tr1_hash_map<new_addr_type, unsigned> line_table;
   line_table pending_lines;
+
+  gpgpu_sim *gpu;
 };
 
 class mshr_table {
@@ -1290,6 +1362,7 @@ class baseline_cache : public cache_t {
         m_level(level),
         m_gpu(gpu) {
     init(name, config, memport, status);
+    m_tag_array->set_gpu(gpu);
   }
 
   void init(const char *name, const cache_config &config,
@@ -1375,6 +1448,8 @@ class baseline_cache : public cache_t {
     mem_access_byte_mask_t byte_mask;
     m_tag_array->fill(addr, time, mask, byte_mask, true);
   }
+
+  std::string get_name() const { return m_name; }
 
  protected:
   // Constructor that can be used by derived classes with custom tag arrays
@@ -1578,6 +1653,8 @@ class data_cache : public baseline_cache {
   virtual enum cache_request_status access(new_addr_type addr, mem_fetch *mf,
                                            unsigned time,
                                            std::list<cache_event> &events);
+  bool stream_reserved_exceeds_allocation(new_addr_type addr,
+                                          unsigned long long streamID) const;
 
  protected:
   data_cache(const char *name, cache_config &config, int core_id, int type_id,

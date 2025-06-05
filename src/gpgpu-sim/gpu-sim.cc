@@ -250,12 +250,24 @@ void memory_config::reg_options(class OptionParser *opp) {
   option_parser_register(
       opp, "-gpgpu_cache:dl2", OPT_CSTR, &m_L2_config.m_config_string,
       "unified banked L2 data cache config "
-      " {<sector?>:<nsets>:<bsize>:<assoc>,<rep>:<wr>:<alloc>:<wr_alloc>:<set_"
+      "{<sector?>:<nsets>:<bsize>:<assoc>,<rep>:<wr>:<alloc>:<wr_alloc>:<set_"
       "index_fn>,<mshr>:<N>:<merge>,<mq>:<fifo_entry>,<data_port_width>",
       "S:32:128:24,L:B:m:L:P,A:192:4,32:0,32");
   option_parser_register(opp, "-gpgpu_cache:dl2_texture_only", OPT_BOOL,
                          &m_L2_texure_only, "L2 cache used for texture only",
                          "1");
+                         
+  // Cache partitioning options
+  option_parser_register(
+      opp, "-gpgpu_cache_stream_partitioning", OPT_BOOL, &gpgpu_cache_stream_partitioning,
+      "Enable stream-based cache partitioning for L1 and L2 caches (default = disabled)", "0");
+  option_parser_register(
+      opp, "-gpgpu_cache_stream0_percentage", OPT_FLOAT, &gpgpu_cache_stream0_percentage,
+      "Percentage of cache allocated to stream 0 (0.0-1.0, default = 0.4)", "0.4");
+  option_parser_register(
+      opp, "-gpgpu_cache_stream1_percentage", OPT_FLOAT, &gpgpu_cache_stream1_percentage,
+      "Percentage of cache allocated to stream 1 (0.0-1.0, default = 0.6)", "0.6");
+
   option_parser_register(
       opp, "-gpgpu_n_mem", OPT_UINT32, &m_n_mem,
       "number of memory modules (e.g. memory controllers) in gpu", "8");
@@ -643,6 +655,11 @@ void shader_core_config::reg_options(class OptionParser *opp) {
   option_parser_register(
       opp, "-gpgpu_concurrent_kernel_sm", OPT_BOOL, &gpgpu_concurrent_kernel_sm,
       "Support concurrent kernels on a SM (default = disabled)", "0");
+      
+  option_parser_register(
+      opp, "-gpgpu_stream_based_allocation", OPT_BOOL, &gpgpu_stream_partitioning,
+      "Enable stream-based core allocation with spatial partitioning (default = enabled)", "1");
+
   option_parser_register(opp, "-gpgpu_perfect_inst_const_cache", OPT_BOOL,
                          &perfect_inst_const_cache,
                          "perfect inst and const cache mode, so all inst and "
@@ -829,6 +846,14 @@ void gpgpu_sim::launch(kernel_info_t *kinfo) {
   for (n = 0; n < m_running_kernels.size(); n++) {
     if ((NULL == m_running_kernels[n]) || m_running_kernels[n]->done()) {
       m_running_kernels[n] = kinfo;
+      if (kinfo->get_streamID() == 0) {
+        m_running_kernels_stream1.push_back(kinfo);
+      } else {
+        m_running_kernels_stream2.push_back(kinfo);
+      }
+      printf("kernel init %i %s streamID %llu kernelID %u, core range %s\n",
+             n, kinfo->name().c_str(), kinfo->get_streamID(),
+             kinfo->get_uid(), kinfo->print_core_range().c_str());
       break;
     }
   }
@@ -914,6 +939,79 @@ kernel_info_t *gpgpu_sim::select_kernel() {
   return NULL;
 }
 
+kernel_info_t *gpgpu_sim::select_kernel(unsigned core_id) {
+  unsigned total_cores = m_config.num_shader();
+  // choose which stream current core belongs to
+  bool isStreamOne = core_id < total_cores/2 || m_running_kernels_stream2.empty();
+
+  if (isStreamOne ) {
+    return select_kernel(core_id, m_running_kernels_stream1, m_last_issued_kernel_stream1);
+  } else {
+    return select_kernel(core_id, m_running_kernels_stream2, m_last_issued_kernel_stream2);
+  }
+}
+
+kernel_info_t *gpgpu_sim::select_kernel(unsigned core_id, std::vector<kernel_info_t *> &m_running_kernels_stream, unsigned &m_last_issued_kernel_stream) {
+  if (m_running_kernels_stream[m_last_issued_kernel_stream] && 
+      !m_running_kernels_stream[m_last_issued_kernel_stream]->no_more_ctas_to_run() &&
+      !m_running_kernels_stream[m_last_issued_kernel_stream]->m_kernel_TB_latency &&
+      m_running_kernels_stream[m_last_issued_kernel_stream]->is_in_core_range(core_id)) {
+    
+    // Record statistics for first time execution
+    unsigned launch_uid = m_running_kernels_stream[m_last_issued_kernel_stream]->get_uid();
+
+    bool findKernel = std::find(m_executed_kernel_uids.begin(), 
+                        m_executed_kernel_uids.end(), launch_uid) != m_executed_kernel_uids.end();
+    if (findKernel) {
+      m_running_kernels_stream[m_last_issued_kernel_stream]->start_cycle = 
+          gpu_sim_cycle + gpu_tot_sim_cycle;
+      m_executed_kernel_uids.push_back(launch_uid);
+      m_executed_kernel_names.push_back(
+          m_running_kernels_stream[m_last_issued_kernel_stream]->name());
+
+      printf("select_kernel core_id %u, stream %u kernel %s\n",
+      core_id, m_last_issued_kernel_stream, m_running_kernels_stream[m_last_issued_kernel_stream]->name().c_str());
+    }
+
+    return m_running_kernels_stream[m_last_issued_kernel_stream];
+  }
+
+  for (unsigned n = 0; n < m_running_kernels_stream.size(); n++) {
+    unsigned idx = (n + m_last_issued_kernel_stream + 1) % m_running_kernels_stream.size();
+    if (kernel_more_cta_left(m_running_kernels_stream[idx]) &&
+        !m_running_kernels_stream[idx]->m_kernel_TB_latency) {
+      if (!m_running_kernels_stream[idx]->is_in_core_range(core_id)) {
+        // If the kernel is not in the core range, skip it
+        //printf("select_kernel skip core_id %u, stream %u kernel %s core range %s\n",
+        //       core_id, idx, m_running_kernels_stream[idx]->name().c_str(),
+        //       m_running_kernels_stream[idx]->print_core_range().c_str());
+        continue;
+      }
+
+      m_last_issued_kernel_stream = idx;
+
+      m_running_kernels_stream[idx]->start_cycle = gpu_sim_cycle + gpu_tot_sim_cycle;
+
+      // record this kernel for stat print if it is the first time this kernel
+      // is selected for execution
+      unsigned launch_uid = m_running_kernels_stream[idx]->get_uid();
+      assert(std::find(m_executed_kernel_uids.begin(),
+                       m_executed_kernel_uids.end(),
+                       launch_uid) == m_executed_kernel_uids.end());
+      m_executed_kernel_uids.push_back(launch_uid);
+      m_executed_kernel_names.push_back(m_running_kernels_stream[idx]->name());
+
+      printf("select_kernel switch core_id %u, stream %u kernel %s\n",
+      core_id, m_last_issued_kernel_stream, m_running_kernels_stream[idx]->name().c_str());
+
+      return m_running_kernels_stream[idx];
+    }
+  }
+
+  return NULL;
+}
+
+
 unsigned gpgpu_sim::finished_kernel() {
   if (m_finished_kernel.empty()) {
     last_streamID = -1;
@@ -936,6 +1034,22 @@ void gpgpu_sim::set_kernel_done(kernel_info_t *kernel) {
   for (k = m_running_kernels.begin(); k != m_running_kernels.end(); k++) {
     if (*k == kernel) {
       kernel->end_cycle = gpu_sim_cycle + gpu_tot_sim_cycle;
+
+      if (streamID == 0) {
+        // Remove from stream1
+        auto it = std::find(m_running_kernels_stream1.begin(),
+                            m_running_kernels_stream1.end(), kernel);
+        if (it != m_running_kernels_stream1.end()) {
+          *it = NULL;        
+        }
+      } else {
+        // Remove from stream2
+        auto it = std::find(m_running_kernels_stream2.begin(),
+                            m_running_kernels_stream2.end(), kernel);
+        if (it != m_running_kernels_stream2.end()) {
+          *it = NULL;        
+        }
+      }
       *k = NULL;
       break;
     }
@@ -1046,6 +1160,14 @@ gpgpu_sim::gpgpu_sim(const gpgpu_sim_config &config, gpgpu_context *ctx)
   m_last_issued_kernel = 0;
   m_last_cluster_issue = m_shader_config->n_simt_clusters -
                          1;  // this causes first launch to use simt cluster 0
+
+  m_last_issued_kernel_stream1 = 0;
+  m_last_issued_kernel_stream2 = 0;
+  
+  // Initialize stream-based allocation variables
+  m_last_cluster_issue_stream1 = m_shader_config->n_simt_clusters/2 - 1;
+  m_last_cluster_issue_stream2 = m_shader_config->n_simt_clusters/2 - 1;
+  
   *average_pipeline_duty_cycle = 0;
   *active_sms = 0;
 
@@ -1116,6 +1238,15 @@ const struct cudaDeviceProp *gpgpu_sim::get_prop() const {
 
 enum divergence_support_t gpgpu_sim::simd_model() const {
   return m_shader_config->model;
+}
+
+void gpgpu_sim::release_core_range_limit() {
+  // This function is used to release the core range limit for all running kernels.
+  // It is used when one stream is done and the next stream could run with all cores.
+  for (unsigned i = 0; i < m_running_kernels.size(); i++) {
+    if (m_running_kernels[i] != NULL)
+      m_running_kernels[i]->set_core_range(0, get_config().num_shader()-1);
+  }
 }
 
 void gpgpu_sim_config::init_clock_domains(void) {
@@ -1811,6 +1942,13 @@ void shader_core_ctx::issue_block2core(kernel_info_t &kernel) {
   else
     assert(occupy_shader_resource_1block(kernel, true));
 
+  /*
+  std::cout << "issue_block2core: " << kernel.get_name() <<
+  " core_id: " << m_sid << " stream_id: " << kernel.get_streamID() <<
+  " start_core: " << kernel.get_start_core() << " end_core: " << kernel.get_end_core() <<
+  " at cycle: " << m_gpu->gpu_sim_cycle << std::endl;
+  */
+
   kernel.inc_running();
 
   // find a free CTA context
@@ -1967,6 +2105,33 @@ void gpgpu_sim::issue_block2core() {
   }
 }
 
+void gpgpu_sim::issue_block2core_stream_partitioning() {
+  // Stream-based core partitioning: each stream gets its allocated core range
+  // We support up to 2 streams with dedicated core ranges
+  
+  unsigned last_issued_1 = m_last_cluster_issue_stream1;
+  for (unsigned i = 0; i < m_shader_config->n_simt_clusters/2; i++) {
+    unsigned idx = (i + last_issued_1 + 1) % m_shader_config->n_simt_clusters/2;
+    unsigned num = m_cluster[idx]->issue_block2core();
+    if (num) {
+      m_last_cluster_issue_stream1 = idx;
+      m_total_cta_launched += num;
+    }
+  }
+
+  unsigned last_issued_2 = m_last_cluster_issue_stream2;
+  for (unsigned i = m_shader_config->n_simt_clusters/2;
+       i < m_shader_config->n_simt_clusters; i++) {
+    unsigned idx = (i + last_issued_2 + 1) % m_shader_config->n_simt_clusters/2
+                    + m_shader_config->n_simt_clusters/2;
+    unsigned num = m_cluster[idx]->issue_block2core();
+    if (num) {
+      m_last_cluster_issue_stream2 = idx;
+      m_total_cta_launched += num;
+    }
+  }
+}
+
 unsigned long long g_single_step =
     0;  // set this in gdb to single step the pipeline
 
@@ -2109,7 +2274,11 @@ void gpgpu_sim::cycle() {
     }
 #endif
 
+  if (m_config.get_stream_partitioning()) {
+    issue_block2core_stream_partitioning();
+  } else {
     issue_block2core();
+  }
     decrement_kernel_latency();
 
     // Depending on configuration, invalidate the caches once all of threads are
@@ -2196,7 +2365,7 @@ void gpgpu_sim::cycle() {
       }
     }
 
-    if (!(gpu_sim_cycle % 50000)) {
+    if (!(gpu_sim_cycle % 100000)) {
       // deadlock detection
       if (m_config.gpu_deadlock_detect && gpu_sim_insn == last_gpu_sim_insn) {
         gpu_deadlock = true;
@@ -2299,6 +2468,23 @@ const memory_config *gpgpu_sim::getMemoryConfig() { return m_memory_config; }
 
 simt_core_cluster *gpgpu_sim::getSIMTCluster() { return *m_cluster; }
 
+// Stream-based core partitioning function implementation
+void gpgpu_sim::set_kernel_core_range(kernel_info_t *kernel, unsigned start_core, unsigned end_core) {
+  // Store the core range information in the kernel for use during shader core allocation
+  // This enables stream-based resource partitioning
+  std::cout << "Setting core range for kernel " << kernel->get_name() 
+            << " (uid:" << kernel->get_uid() << ", stream:" << kernel->get_streamID() 
+            << ") to cores [" << start_core << "-" << end_core << "]" << std::endl;
+          
+  // Store core range in kernel metadata
+  kernel->set_core_range(start_core, end_core);
+  
+  std::cout << "CONFIRMED: Kernel " << kernel->get_name() 
+            << " core range set - has_range:" << kernel->has_core_range()
+            << ", start:" << kernel->get_start_core() 
+            << ", end:" << kernel->get_end_core() << std::endl;
+}
+
 void sst_gpgpu_sim::SST_gpgpusim_numcores_equal_check(unsigned sst_numcores) {
   if (m_shader_config->n_simt_clusters != sst_numcores) {
     assert(
@@ -2389,7 +2575,7 @@ void sst_gpgpu_sim::SST_cycle() {
     }
   }
 
-  if (!(gpu_sim_cycle % 20000)) {
+  if (!(gpu_sim_cycle % 100000)) {
     // deadlock detection
     if (m_config.gpu_deadlock_detect && gpu_sim_insn == last_gpu_sim_insn) {
       gpu_deadlock = true;
@@ -2404,4 +2590,15 @@ void sst_gpgpu_sim::SST_cycle() {
   // launch device kernel
   gpgpu_ctx->device_runtime->launch_one_device_kernel();
 #endif
+}
+
+unsigned long long gpgpu_sim::get_first_stream_id() const {
+  // Helper function to get the first stream ID for stream partitioning
+  // This assumes we track the first stream we see
+  for (unsigned i = 0; i < m_running_kernels.size(); i++) {
+    if (m_running_kernels[i] != NULL) {
+      return m_running_kernels[i]->get_streamID();
+    }
+  }
+  return 0;  // Default stream ID
 }

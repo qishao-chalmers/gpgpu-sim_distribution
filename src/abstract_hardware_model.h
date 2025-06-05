@@ -291,9 +291,34 @@ class kernel_info_t {
            m_next_tid.x < m_block_dim.x;
   }
   unsigned get_uid() const { return m_uid; }
+  void set_streamID(unsigned long long streamID) { m_streamID = streamID; }
   unsigned long long get_streamID() const { return m_streamID; }
   std::string get_name() const { return name(); }
   std::string name() const;
+
+  // Core range management for stream-based partitioning
+  void set_core_range(unsigned start_core, unsigned end_core) {
+    m_has_core_range = true;
+    m_start_core = start_core;
+    m_end_core = end_core;
+  }
+  
+  bool has_core_range() const { return m_has_core_range; }
+  unsigned get_start_core() const { return m_start_core; }
+  unsigned get_end_core() const { return m_end_core; }
+
+  bool is_in_core_range(unsigned coreId) {
+    return ((coreId >= m_start_core && coreId <= m_end_core) ||
+           !m_has_core_range);
+  }
+
+  std::string print_core_range() const {
+    if (m_has_core_range) {
+      return std::to_string(m_start_core) + "-" + std::to_string(m_end_core);
+    } else {
+      return "no core range";
+    }
+  }
 
   std::list<class ptx_thread_info *> &active_threads() {
     return m_active_threads;
@@ -374,6 +399,11 @@ class kernel_info_t {
 
   unsigned m_kernel_TB_latency;  // this used for any CPU-GPU kernel latency and
                                  // counted in the gpu_cycle
+
+  // Core range management for stream-based partitioning
+  bool m_has_core_range;
+  unsigned m_start_core;
+  unsigned m_end_core;
 };
 
 class core_config {
@@ -1456,6 +1486,15 @@ class register_set {
     move_warp(dest, *ready);
   }
 
+  void print(FILE *fp) const {
+    fprintf(fp, "%s : @%p\n", m_name, this);
+    for (unsigned i = 0; i < regs.size(); i++) {
+      fprintf(fp, "     ");
+      regs[i]->print(fp);
+      fprintf(fp, "\n");
+    }
+  }
+
   warp_inst_t **get_ready() {
     warp_inst_t **ready;
     ready = NULL;
@@ -1477,15 +1516,6 @@ class register_set {
     assert(reg_id < regs.size());
     if (not regs[reg_id]->empty()) ready = &regs[reg_id];
     return ready;
-  }
-
-  void print(FILE *fp) const {
-    fprintf(fp, "%s : @%p\n", m_name, this);
-    for (unsigned i = 0; i < regs.size(); i++) {
-      fprintf(fp, "     ");
-      regs[i]->print(fp);
-      fprintf(fp, "\n");
-    }
   }
 
   warp_inst_t **get_free() {

@@ -305,7 +305,15 @@ class memory_config {
             m_n_mem_sub_partition);
 
     m_address_mapping.init(m_n_mem, m_n_sub_partition_per_memory_channel);
+
     m_L2_config.init(&m_address_mapping);
+
+    // Cache partitioning options
+    if (gpgpu_cache_stream_partitioning) {
+      m_L2_config.enable_stream_partitioning();
+      m_L2_config.set_stream_allocation(0, gpgpu_cache_stream0_percentage);
+      m_L2_config.set_stream_allocation(1, gpgpu_cache_stream1_percentage);
+    }
 
     m_valid = true;
 
@@ -330,6 +338,11 @@ class memory_config {
   char *gpgpu_dram_timing_opt;
   char *gpgpu_L2_queue_config;
   bool l2_ideal;
+
+  // Cache stream partitioning configuration
+  bool gpgpu_cache_stream_partitioning;
+  float gpgpu_cache_stream0_percentage;
+  float gpgpu_cache_stream1_percentage;
   unsigned gpgpu_frfcfs_dram_sched_queue_size;
   unsigned gpgpu_dram_return_queue_size;
   enum dram_ctrl_t scheduler_type;
@@ -446,7 +459,10 @@ class gpgpu_sim_config : public power_config,
   unsigned get_core_freq() const { return core_freq; }
   unsigned num_shader() const { return m_shader_config.num_shader(); }
   unsigned num_cluster() const { return m_shader_config.n_simt_clusters; }
+
   unsigned get_max_concurrent_kernel() const { return max_concurrent_kernel; }
+
+  bool get_stream_partitioning() const { return m_shader_config.gpgpu_stream_partitioning; }
 
   /**
    * @brief Check if we are in SST mode
@@ -581,6 +597,9 @@ class gpgpu_sim : public gpgpu_t {
 
   void launch(kernel_info_t *kinfo);
   bool can_start_kernel();
+  kernel_info_t *next_kernel();
+  void set_kernel_core_range(kernel_info_t *kernel, unsigned start_core, unsigned end_core);
+
   unsigned finished_kernel();
   void set_kernel_done(kernel_info_t *kernel);
   void stop_all_running_kernels();
@@ -618,11 +637,16 @@ class gpgpu_sim : public gpgpu_t {
   const struct cudaDeviceProp *get_prop() const;
   enum divergence_support_t simd_model() const;
 
+  void release_core_range_limit();
+
   unsigned threads_per_core() const;
   bool get_more_cta_left() const;
   bool kernel_more_cta_left(kernel_info_t *kernel) const;
   bool hit_max_cta_count() const;
   kernel_info_t *select_kernel();
+  kernel_info_t *select_kernel(unsigned core_id);
+  kernel_info_t *select_kernel(unsigned core_id, std::vector<kernel_info_t *> &running_kernels, unsigned &last_issued_kernel);
+
   PowerscalingCoefficients *get_scaling_coeffs();
   void decrement_kernel_latency();
 
@@ -675,6 +699,7 @@ class gpgpu_sim : public gpgpu_t {
   void reinit_clock_domains(void);
   int next_clock_domain(void);
   void issue_block2core();
+  void issue_block2core_stream_partitioning();  // Stream-based core allocation
   void print_dram_stats(FILE *fout) const;
   void shader_print_runtime_stat(FILE *fout);
   void shader_print_l1_miss_stat(FILE *fout) const;
@@ -692,6 +717,8 @@ class gpgpu_sim : public gpgpu_t {
   class memory_sub_partition **m_memory_sub_partition;
 
   std::vector<kernel_info_t *> m_running_kernels;
+  std::vector<kernel_info_t *> m_running_kernels_stream1;
+  std::vector<kernel_info_t *> m_running_kernels_stream2;
   unsigned m_last_issued_kernel;
 
   std::list<unsigned> m_finished_kernel;
@@ -702,6 +729,14 @@ class gpgpu_sim : public gpgpu_t {
   unsigned gpu_completed_cta;
 
   unsigned m_last_cluster_issue;
+
+  unsigned m_last_issued_kernel_stream1;
+  unsigned m_last_issued_kernel_stream2;
+
+  // Stream-based core partitioning support
+  unsigned m_last_cluster_issue_stream1;
+  unsigned m_last_cluster_issue_stream2;
+  
   float *average_pipeline_duty_cycle;
   float *active_sms;
   // time of next rising edge
@@ -803,6 +838,19 @@ class gpgpu_sim : public gpgpu_t {
     m_functional_sim = false;
     m_functional_sim_kernel = NULL;
   }
+
+  unsigned long long get_first_stream_id() const;  // Helper for stream partitioning
+
+  void copy_to_gpu();
+  void copy_from_gpu();
+
+  void gpu_instruction_stats_visualizer_print_file();
+
+  class memory_space *get_global_memory() {
+    return m_global_mem;
+  }
+  class memory_space *get_tex_memory() { return m_tex_mem; }
+  class memory_space *get_surf_memory() { return m_surf_mem; }
 };
 
 class exec_gpgpu_sim : public gpgpu_sim {
