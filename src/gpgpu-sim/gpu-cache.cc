@@ -175,9 +175,9 @@ tag_array::~tag_array() {
   delete[] m_lines;
 }
 
-tag_array::tag_array(cache_config &config, int core_id, int type_id,
+tag_array::tag_array(const char *name, cache_config &config, int core_id, int type_id,
                      cache_block_t **new_lines)
-    : m_config(config), m_lines(new_lines) {
+    : m_name(name),m_config(config), m_lines(new_lines) {
   init(core_id, type_id);
 }
 
@@ -185,8 +185,8 @@ void tag_array::update_cache_parameters(cache_config &config) {
   m_config = config;
 }
 
-tag_array::tag_array(cache_config &config, int core_id, int type_id)
-    : m_config(config) {
+tag_array::tag_array(const char *name, cache_config &config, int core_id, int type_id)
+    : m_name(name), m_config(config) {
   // assert( m_config.m_write_policy == READ_ONLY ); Old assert
   unsigned cache_lines_num = config.get_max_num_lines();
   m_lines = new cache_block_t *[cache_lines_num];
@@ -294,7 +294,7 @@ enum cache_request_status tag_array::probe(new_addr_type addr, unsigned &idx,
   for (unsigned way = 0; way < m_config.m_assoc; way++) {
     unsigned index = set_index * m_config.m_assoc + way;
     cache_block_t *line = m_lines[index];
-    if (line->m_tag == tag) {
+    if (line->m_tag == tag && line->m_stream_id == streamID) {
       if (line->get_status(mask) == RESERVED) {
         idx = index;
         return HIT_RESERVED;
@@ -392,11 +392,12 @@ enum cache_request_status tag_array::probe(new_addr_type addr, unsigned &idx,
           for (unsigned way = 0; way < m_config.m_assoc; way++) {
             unsigned index = set_index * m_config.m_assoc + way;
             cache_block_t *line = m_lines[index];
-
-            //printf("## addr %0#x streamID: %llu, index %llu line->m_stream_id: %llu, "
-            //      "reserved: %d, last_access: %llu\n",
-            //      addr, streamID, index, line->m_stream_id,
-            //      line->is_reserved_line(), line->get_last_access_time());
+            /*
+            printf("## cache %s addr %0#llx streamID: %llu, index %llu line->m_stream_id: %llu, "
+                  "reserved: %d, last_access: %llu\n",
+                  get_name().c_str(), streamID, index, line->m_stream_id,
+                  line->is_reserved_line(), line->get_last_access_time());
+            */
           }
           return RESERVATION_FAIL;  // no enough ways reserved for the stream
         }
@@ -408,13 +409,15 @@ enum cache_request_status tag_array::probe(new_addr_type addr, unsigned &idx,
             continue;
           unsigned index = set_index * m_config.m_assoc + way;
           cache_block_t *line = m_lines[index];
-          
-          printf("#### addr %0#x streamID: %llu, invalid %d line->m_stream_id: %llu, index %llu "
-                "line reserved/modified/valid: %d/%d/%d, last_access: %llu stream way num %d cycle %llu\n",
-                addr, streamID, invalid_line, line->m_stream_id, index, line->is_reserved_line(),
-                line->is_modified_line(), line->is_valid_line(),
+          /*
+          printf("#### cache %s addr %0#llx streamID: %llu, invalid %d line->m_stream_id: %llu, index %llu "
+                "line reserved/modified/valid: %d/%d/%d, blk addr %0#llx last_access: %llu stream way %d cycle %llu\n",
+                get_name().c_str(), addr, streamID, invalid_line, line->m_stream_id, index,
+                line->is_reserved_line(), line->is_modified_line(), line->is_valid_line(),
+                line->m_block_addr,
                 line->get_last_access_time(), get_stream_wayNum(streamID), 
                 gpu->gpu_tot_sim_cycle+gpu->gpu_sim_cycle);
+          */
         
       }
             
@@ -423,11 +426,12 @@ enum cache_request_status tag_array::probe(new_addr_type addr, unsigned &idx,
         for (unsigned way = 0; way < m_config.m_assoc; way++) {
           unsigned index = set_index * m_config.m_assoc + way;
           cache_block_t *line = m_lines[index];
-
-          printf("#### addr %0#x streamID: %llu, line->m_stream_id: %llu, index %llu "
-                "line reserved/modified/valid: %d/%d/%d, last_access: %llu\n",
-                addr, streamID, line->m_stream_id, index, line->is_reserved_line(),
+          
+          printf("#### cache %s addr %0#x streamID: %llu, line->m_stream_id: %llu, index %llu "
+                "line reserved/modified/valid: %d/%d/%d, blk addr %0#llx last_access: %llu\n",
+                get_name().c_str(),addr, streamID, line->m_stream_id, index, line->is_reserved_line(),
                 line->is_modified_line(), line->is_valid_line(),
+                line->m_block_addr,
                 line->get_last_access_time());
         }
         
@@ -472,6 +476,16 @@ enum cache_request_status tag_array::access(new_addr_type addr, unsigned time,
     case HIT_RESERVED:
       m_pending_hit++;
     case HIT:
+      /*
+      if (idx == 182) {
+        printf("#### cache hit %s addr %0#llx streamID: %llu, index %d line->m_stream_id: %llu, "
+               "line reserved/modified/valid: %d/%d/%d, last_access: %llu\n",
+               get_name().c_str(), addr, mf->get_streamID(), idx,
+               m_lines[idx]->m_stream_id, m_lines[idx]->is_reserved_line(),
+               m_lines[idx]->is_modified_line(), m_lines[idx]->is_valid_line(),
+               m_lines[idx]->get_last_access_time());
+      }
+      */
       m_lines[idx]->set_last_access_time(time, mf->get_access_sector_mask());
       break;
     case MISS:
@@ -485,6 +499,7 @@ enum cache_request_status tag_array::access(new_addr_type addr, unsigned time,
                            m_lines[idx]->get_modified_size(),
                            m_lines[idx]->get_dirty_byte_mask(),
                            m_lines[idx]->get_dirty_sector_mask());
+          evicted.set_stream_id(m_lines[idx]->m_stream_id);
           m_dirty--;
         }
         m_lines[idx]->allocate(m_config.tag(addr), m_config.block_addr(addr),
@@ -492,7 +507,8 @@ enum cache_request_status tag_array::access(new_addr_type addr, unsigned time,
         
         // Set stream ID for the allocated line
         if (mf) {
-          m_lines[idx]->m_stream_id = mf->get_streamID();
+          //m_lines[idx]->m_stream_id = mf->get_streamID();
+          m_lines[idx]->set_stream_id(mf->get_streamID(),time);
         }
       }
       break;
@@ -507,7 +523,9 @@ enum cache_request_status tag_array::access(new_addr_type addr, unsigned time,
 
         // Set stream ID for the allocated line
         if (mf) {
-          m_lines[idx]->m_stream_id = mf->get_streamID();
+          //m_lines[idx]->m_stream_id = mf->get_streamID();
+          //m_lines[idx]->set_stream_id(mf->get_streamID(),time);
+          m_lines[idx]->set_stream_id(mf,time);
         }
         if (before && !m_lines[idx]->is_modified_line()) {
           m_dirty--;
@@ -556,6 +574,7 @@ void tag_array::fill(new_addr_type addr, unsigned time,
     assert(m_config.m_cache_type == SECTOR);
     ((sector_cache_block *)m_lines[idx])->allocate_sector(time, mask);
   }
+  // Set stream ID for the allocated line
   if (before && !m_lines[idx]->is_modified_line()) {
     m_dirty--;
   }
@@ -565,7 +584,8 @@ void tag_array::fill(new_addr_type addr, unsigned time,
     m_dirty++;
   }
 
-  m_lines[idx]->m_stream_id = m_stream_id;
+  //m_lines[idx]->m_stream_id = m_stream_id;
+  m_lines[idx]->set_stream_id(m_stream_id,time);
 }
 
 void tag_array::fill(unsigned index, unsigned time, mem_fetch *mf) {
@@ -576,7 +596,8 @@ void tag_array::fill(unsigned index, unsigned time, mem_fetch *mf) {
   if (m_lines[index]->is_modified_line() && !before) {
     m_dirty++;
   }
-  m_lines[index]->m_stream_id = mf->get_streamID();
+  //m_lines[index]->m_stream_id = mf->get_streamID();
+  m_lines[index]->set_stream_id(mf->get_streamID(),time);
 }
 
 // TODO: we need write back the flushed data to the upper level
@@ -1778,7 +1799,8 @@ enum cache_request_status data_cache::wr_miss_wa_naive(
           evicted.m_block_addr, m_wrbk_type, mf->get_access_warp_mask(),
           evicted.m_byte_mask, evicted.m_sector_mask, evicted.m_modified_size,
           true, m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle, -1, -1, -1,
-          NULL, mf->get_streamID());
+          NULL, evicted.m_stream_id);
+
       // the evicted block may have wrong chip id when advanced L2 hashing  is
       // used, so set the right chip address from the original mf
       wb->set_chip(mf->get_tlx_addr().chip);
@@ -1832,7 +1854,7 @@ enum cache_request_status data_cache::wr_miss_wa_fetch_on_write(
             evicted.m_block_addr, m_wrbk_type, mf->get_access_warp_mask(),
             evicted.m_byte_mask, evicted.m_sector_mask, evicted.m_modified_size,
             true, m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle, -1, -1, -1,
-            NULL, mf->get_streamID());
+            NULL, evicted.m_stream_id);
         // the evicted block may have wrong chip id when advanced L2 hashing  is
         // used, so set the right chip address from the original mf
         wb->set_chip(mf->get_tlx_addr().chip);
@@ -1909,7 +1931,7 @@ enum cache_request_status data_cache::wr_miss_wa_fetch_on_write(
             evicted.m_block_addr, m_wrbk_type, mf->get_access_warp_mask(),
             evicted.m_byte_mask, evicted.m_sector_mask, evicted.m_modified_size,
             true, m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle, -1, -1, -1,
-            NULL, mf->get_streamID());
+            NULL, evicted.m_stream_id);
         // the evicted block may have wrong chip id when advanced L2 hashing  is
         // used, so set the right chip address from the original mf
         wb->set_chip(mf->get_tlx_addr().chip);
@@ -1977,7 +1999,7 @@ enum cache_request_status data_cache::wr_miss_wa_lazy_fetch_on_read(
           evicted.m_block_addr, m_wrbk_type, mf->get_access_warp_mask(),
           evicted.m_byte_mask, evicted.m_sector_mask, evicted.m_modified_size,
           true, m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle, -1, -1, -1,
-          NULL, mf->get_streamID());
+          NULL, evicted.m_stream_id);
       // the evicted block may have wrong chip id when advanced L2 hashing  is
       // used, so set the right chip address from the original mf
       wb->set_chip(mf->get_tlx_addr().chip);
@@ -2061,7 +2083,7 @@ enum cache_request_status data_cache::rd_miss_base(
           evicted.m_block_addr, m_wrbk_type, mf->get_access_warp_mask(),
           evicted.m_byte_mask, evicted.m_sector_mask, evicted.m_modified_size,
           true, m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle, -1, -1, -1,
-          NULL, mf->get_streamID());
+          NULL, evicted.m_stream_id);
       // the evicted block may have wrong chip id when advanced L2 hashing  is
       // used, so set the right chip address from the original mf
       wb->set_chip(mf->get_tlx_addr().chip);

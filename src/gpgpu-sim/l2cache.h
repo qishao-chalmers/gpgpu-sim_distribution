@@ -226,7 +226,7 @@ class memory_sub_partition {
   fifo_pipeline<mem_fetch> *m_L2_dram_queue;
   fifo_pipeline<mem_fetch> *m_dram_L2_queue;
   fifo_pipeline<mem_fetch> *m_L2_icnt_queue;  // L2 cache hit response queue
-  std::queue<mem_fetch *> m_l2_delayed_queue;
+  std::queue<mem_fetch*> m_l2_delayed_queue;
 
   class mem_fetch *L2dramout;
   unsigned long long int wb_addr;

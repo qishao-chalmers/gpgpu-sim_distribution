@@ -106,6 +106,9 @@ class mem_fetch {
   unsigned get_timestamp() const { return m_timestamp; }
   unsigned get_return_timestamp() const { return m_timestamp2; }
   unsigned get_icnt_receive_time() const { return m_icnt_receive_time; }
+  void set_streamID(unsigned long long streamID) {
+    m_streamID = streamID;
+  }
   unsigned long long get_streamID() const { return m_streamID; }
 
   enum mem_access_type get_access_type() const { return m_access.get_type(); }
@@ -165,7 +168,8 @@ class mem_fetch {
   // requesting instruction (put last so mem_fetch prints nicer in gdb)
   warp_inst_t m_inst;
 
-  unsigned long long m_streamID;
+  // stream ID of the request, used for stream operations
+  unsigned long long m_streamID = (unsigned long long )-1;
 
   static unsigned sm_next_mf_request_uid;
 

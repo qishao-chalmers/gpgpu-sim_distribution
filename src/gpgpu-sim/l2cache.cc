@@ -525,28 +525,29 @@ void memory_sub_partition::cache_cycle(unsigned cycle) {
   if (!m_config->m_L2_config.disabled()) m_L2cache->cycle();
 
   // new L2 texture accesses and/or non-texture accesses
-
   bool picked_l2_delayed_queue = false;
-  bool picked_icnt_l2_queue = false;
-
+  bool picked_icnt_l2_queue = true;
+  /*
   mem_fetch *mf = nullptr;
   // L2 delayed queue
   if (!m_l2_delayed_queue.empty()) {
     mf = m_l2_delayed_queue.front();
     if (!m_L2cache->stream_reserved_exceeds_allocation(mf->get_addr(), mf->get_streamID())) {
       picked_l2_delayed_queue = true;
-      //printf("pick mf from delayed queue: %p, addr: %llx, streamID: %llu\n",
-      //       mf, mf->get_addr(), mf->get_streamID());
+      printf("pick mf from delayed queue: %p, addr: %llx, streamID: %llu cycle %llu\n",
+             mf, mf->get_addr(), mf->get_streamID(),
+            m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);
     } else {
-      //printf("Not pick mf from delayed queue: %p, addr: %llx, streamID: %llu for reserved lines\n",
-      //mf, mf->get_addr(), mf->get_streamID());
+      printf("Not pick mf from delayed queue: %p, addr: %llx, streamID: %llu for reserved lines cycle %llu\n",
+      mf, mf->get_addr(), mf->get_streamID(),
+      m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);
       mf = nullptr;
     }
   }
   if (!picked_l2_delayed_queue && !m_icnt_L2_queue->empty()) {
     mf = m_icnt_L2_queue->top();
     // check if the stream is reserved exceeds allocation
-    if (m_config->gpgpu_cache_stream_partitioning) {
+    if (m_config->gpgpu_cache_stream_partitioning && false) {
       if (m_L2cache->stream_reserved_exceeds_allocation(mf->get_addr(), mf->get_streamID())) {
         m_icnt_L2_queue->pop();
         m_l2_delayed_queue.push(mf);
@@ -565,6 +566,9 @@ void memory_sub_partition::cache_cycle(unsigned cycle) {
   }
 
   if (!m_L2_dram_queue->full() && mf) {
+  */
+  if (!m_L2_dram_queue->full() && !m_icnt_L2_queue->empty()) {
+    mem_fetch *mf = m_icnt_L2_queue->top();
     if (!m_config->m_L2_config.disabled() &&
         ((m_config->m_L2_texure_only && mf->istexture()) ||
          (!m_config->m_L2_texure_only))) {
@@ -709,6 +713,8 @@ void memory_sub_partition::print(FILE *fp) const {
     m_L2cache->display_state(fp);
     m_config->m_L2_config.print(fp);
   }
+  // print inct to L2 queue
+  m_icnt_L2_queue->print();
 }
 
 void memory_stats_t::visualizer_print(gzFile visualizer_file) {

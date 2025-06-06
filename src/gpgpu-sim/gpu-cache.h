@@ -84,11 +84,14 @@ struct evicted_block_info {
   unsigned m_modified_size;
   mem_access_byte_mask_t m_byte_mask;
   mem_access_sector_mask_t m_sector_mask;
+  unsigned long long m_stream_id; // Stream ID of the evicted block
+
   evicted_block_info() {
     m_block_addr = 0;
     m_modified_size = 0;
     m_byte_mask.reset();
     m_sector_mask.reset();
+    m_stream_id = (unsigned long long) -1; // Default stream ID
   }
   void set_info(new_addr_type block_addr, unsigned modified_size) {
     m_block_addr = block_addr;
@@ -101,6 +104,14 @@ struct evicted_block_info {
     m_modified_size = modified_size;
     m_byte_mask = byte_mask;
     m_sector_mask = sector_mask;
+  }
+
+  void set_stream_id(unsigned long long stream_id) {
+    m_stream_id = stream_id; // Set the stream ID of the evicted block
+  }
+
+  unsigned long long get_stream_id() const {
+    return m_stream_id; // Get the stream ID of the evicted block
   }
 };
 
@@ -137,6 +148,39 @@ struct cache_block_t {
 
   virtual void reset_stream_id() {
     m_stream_id = (unsigned long long) -1; // Reset to default stream ID
+  }
+
+  void set_stream_id(unsigned long long stream_id, unsigned long long time) {
+    /*
+    if (m_block_addr == 0xffffffff00000180) {
+      if (m_stream_id == 1 && stream_id == 0) {
+        printf("why ??? block addr %0#llx Setting stream ID %llu ->  %llu  for cache line at time %llu\n",
+               m_block_addr, m_stream_id, stream_id, time);
+      }
+      printf("block addr %0#llx Setting stream ID %llu ->  %llu  for cache line at time %llu\n",
+          m_block_addr, m_stream_id, stream_id, time);
+    }
+    */
+    m_stream_id = stream_id; // Set the stream ID for this cache line
+  }
+
+  void set_stream_id(mem_fetch* mf, unsigned long long time) {
+    unsigned long long stream_id = mf->get_streamID();
+    /*
+    unsigned uid = mf->get_request_uid();
+    unsigned sid = mf->get_sid();
+    unsigned tpc = mf->get_tpc();
+    unsigned wid = mf->get_wid();
+    if (m_block_addr == 0xffffffff00000180) {
+      if (m_stream_id == 1 && stream_id == 0) {
+        printf("why ??? block addr %0#llx id %d/%d/%d/%d Setting stream ID %llu ->  %llu  for cache line at time %llu\n",
+               m_block_addr, uid, sid, tpc, wid, m_stream_id, stream_id, time);
+      }
+      printf("block addr %0#llx Setting stream ID %llu ->  %llu  for cache line at time %llu\n",
+          m_block_addr, m_stream_id, stream_id, time);
+    }
+    */
+    m_stream_id = stream_id; // Set the stream ID for this cache line
   }
 
   virtual bool is_invalid_line() = 0;
@@ -987,7 +1031,7 @@ class l2_cache_config : public cache_config {
 class tag_array {
  public:
   // Use this constructor
-  tag_array(cache_config &config, int core_id, int type_id);
+  tag_array(const char *name, cache_config &config, int core_id, int type_id);
   ~tag_array();
 
   enum cache_request_status probe(new_addr_type addr, unsigned &idx,
@@ -1048,11 +1092,13 @@ class tag_array {
 
   void set_gpu(gpgpu_sim *gpu_) { gpu = gpu_; }
 
+  std::string get_name() const { return m_name; }
+
  protected:
   // This constructor is intended for use only from derived classes that wish to
   // avoid unnecessary memory allocation that takes place in the
   // other tag_array constructor
-  tag_array(cache_config &config, int core_id, int type_id,
+  tag_array(const char *name, cache_config &config, int core_id, int type_id,
             cache_block_t **new_lines);
   void init(int core_id, int type_id);
 
@@ -1060,6 +1106,8 @@ class tag_array {
   cache_config &m_config;
 
   cache_block_t **m_lines; /* nbanks x nset x assoc lines in total */
+
+  std::string m_name;
 
   unsigned m_access;
   unsigned m_miss;
@@ -1356,7 +1404,7 @@ class baseline_cache : public cache_t {
                  enum mem_fetch_status status, enum cache_gpu_level level,
                  gpgpu_sim *gpu)
       : m_config(config),
-        m_tag_array(new tag_array(config, core_id, type_id)),
+        m_tag_array(new tag_array(name, config, core_id, type_id)),
         m_mshrs(config.m_mshr_entries, config.m_mshr_max_merge),
         m_bandwidth_management(config),
         m_level(level),
@@ -1831,7 +1879,7 @@ class tex_cache : public cache_t {
             mem_fetch_interface *memport, enum mem_fetch_status request_status,
             enum mem_fetch_status rob_status)
       : m_config(config),
-        m_tags(config, core_id, type_id),
+        m_tags(name, config, core_id, type_id),
         m_fragment_fifo(config.m_fragment_fifo_entries),
         m_request_fifo(config.m_request_fifo_entries),
         m_rob(config.m_rob_entries),
