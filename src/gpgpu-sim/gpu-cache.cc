@@ -232,6 +232,14 @@ void tag_array::init(int core_id, int type_id) {
   m_type_id = type_id;
   is_used = false;
   m_dirty = 0;
+
+  // Eviction statistics
+  m_evictions = 0;
+  m_evictions_no_reuse = 0;
+
+  // Snapshot counters
+  m_prev_snapshot_evictions = 0;
+  m_prev_snapshot_evictions_no_reuse = 0;
 }
 
 void tag_array::add_pending_line(mem_fetch *mf) {
@@ -307,12 +315,25 @@ enum cache_request_status tag_array::probe(new_addr_type addr, unsigned &idx,
           return HIT;
         } else {
           idx = index;
-          return SECTOR_MISS;
+          if (m_config.is_fill_entire_line()) {
+            line->set_m_readable(true, mask);
+            line->set_status(VALID, mask);
+            return HIT;
+          } else {
+            return SECTOR_MISS;
+          }
         }
 
       } else if (line->is_valid_line() && line->get_status(mask) == INVALID) {
         idx = index;
-        return SECTOR_MISS;
+        if (m_config.is_fill_entire_line() ||
+            m_config.is_fill_entire_line_on_clean()) {
+          line->set_m_readable(true, mask);
+          line->set_status(VALID, mask);
+          return HIT;
+        } else {
+          return SECTOR_MISS;
+        }
       } else {
         assert(line->get_status(mask) == INVALID);
       }
@@ -476,16 +497,6 @@ enum cache_request_status tag_array::access(new_addr_type addr, unsigned time,
     case HIT_RESERVED:
       m_pending_hit++;
     case HIT:
-      /*
-      if (idx == 182) {
-        printf("#### cache hit %s addr %0#llx streamID: %llu, index %d line->m_stream_id: %llu, "
-               "line reserved/modified/valid: %d/%d/%d, last_access: %llu\n",
-               get_name().c_str(), addr, mf->get_streamID(), idx,
-               m_lines[idx]->m_stream_id, m_lines[idx]->is_reserved_line(),
-               m_lines[idx]->is_modified_line(), m_lines[idx]->is_valid_line(),
-               m_lines[idx]->get_last_access_time());
-      }
-      */
       m_lines[idx]->set_last_access_time(time, mf->get_access_sector_mask());
       break;
     case MISS:
@@ -502,8 +513,23 @@ enum cache_request_status tag_array::access(new_addr_type addr, unsigned time,
           evicted.set_stream_id(m_lines[idx]->m_stream_id);
           m_dirty--;
         }
-        m_lines[idx]->allocate(m_config.tag(addr), m_config.block_addr(addr),
+
+        if (m_config.is_fill_entire_line() && false) {
+          m_lines[idx]->allocate_all_sectors(m_config.tag(addr), m_config.block_addr(addr),
                                time, mf->get_access_sector_mask());
+        } else {
+          m_lines[idx]->allocate(m_config.tag(addr), m_config.block_addr(addr),
+                               time, mf->get_access_sector_mask());
+        }
+
+
+        if (m_lines[idx]->is_valid_line() || m_lines[idx]->is_modified_line()) {
+          m_evictions++;
+          // If the line was never used after allocation (no hits), mark as no-reuse
+          if (m_lines[idx]->get_last_access_time() == m_lines[idx]->get_alloc_time()) {
+            m_evictions_no_reuse++;
+          }
+        }
         
         // Set stream ID for the allocated line
         if (mf) {
@@ -568,8 +594,13 @@ void tag_array::fill(new_addr_type addr, unsigned time,
   // assert(status==MISS||status==SECTOR_MISS); // MSHR should have prevented
   // redundant memory request
   if (status == MISS) {
-    m_lines[idx]->allocate(m_config.tag(addr), m_config.block_addr(addr), time,
-                           mask);
+      if (m_config.is_fill_entire_line() && false) {
+        m_lines[idx]->allocate_all_sectors(m_config.tag(addr), m_config.block_addr(addr),
+                               time, mask);
+      } else {
+        m_lines[idx]->allocate(m_config.tag(addr), m_config.block_addr(addr), time,
+                             mask);
+    }
   } else if (status == SECTOR_MISS) {
     assert(m_config.m_cache_type == SECTOR);
     ((sector_cache_block *)m_lines[idx])->allocate_sector(time, mask);
@@ -579,7 +610,13 @@ void tag_array::fill(new_addr_type addr, unsigned time,
     m_dirty--;
   }
   before = m_lines[idx]->is_modified_line();
-  m_lines[idx]->fill(time, mask, byte_mask);
+
+  if (m_config.is_fill_entire_line() && false) {
+    m_lines[idx]->fill_all_sectors(time, mask, byte_mask);
+  } else {
+    m_lines[idx]->fill(time, mask, byte_mask);
+  }
+
   if (m_lines[idx]->is_modified_line() && !before) {
     m_dirty++;
   }
@@ -591,8 +628,14 @@ void tag_array::fill(new_addr_type addr, unsigned time,
 void tag_array::fill(unsigned index, unsigned time, mem_fetch *mf) {
   assert(m_config.m_alloc_policy == ON_MISS);
   bool before = m_lines[index]->is_modified_line();
-  m_lines[index]->fill(time, mf->get_access_sector_mask(),
+  if (m_config.is_fill_entire_line() && false) {
+    m_lines[index]->fill_all_sectors(time, mf->get_access_sector_mask(),
                        mf->get_access_byte_mask());
+  } else {
+    m_lines[index]->fill(time, mf->get_access_sector_mask(),
+                       mf->get_access_byte_mask());
+  }
+
   if (m_lines[index]->is_modified_line() && !before) {
     m_dirty++;
   }
@@ -641,6 +684,10 @@ void tag_array::new_window() {
   m_prev_snapshot_miss = m_miss;
   m_prev_snapshot_miss = m_miss + m_sector_miss;
   m_prev_snapshot_pending_hit = m_pending_hit;
+
+  // Take eviction snapshots
+  m_prev_snapshot_evictions = m_evictions;
+  m_prev_snapshot_evictions_no_reuse = m_evictions_no_reuse;
 }
 
 void tag_array::print(FILE *stream, unsigned &total_access,
@@ -648,10 +695,12 @@ void tag_array::print(FILE *stream, unsigned &total_access,
   m_config.print(stream);
   fprintf(stream,
           "\t\tAccess = %d, Miss = %d, Sector_Miss = %d, Total_Miss = %d "
-          "(%.3g), PendingHit = %d (%.3g)\n",
+          "(%.3g), PendingHit = %d (%.3g), Evictions = %d (%.3g), Evictions_No_Reuse = %d (%.3g)\n",
           m_access, m_miss, m_sector_miss, (m_miss + m_sector_miss),
           (float)(m_miss + m_sector_miss) / m_access, m_pending_hit,
-          (float)m_pending_hit / m_access);
+          (float)m_pending_hit / m_access, m_evictions,
+          (float)m_evictions / m_access, m_evictions_no_reuse,
+          (float)m_evictions_no_reuse / m_access);
   total_misses += (m_miss + m_sector_miss);
   total_access += m_access;
 }
@@ -670,6 +719,10 @@ void tag_array::get_stats(unsigned &total_access, unsigned &total_misses,
 
 void tag_array::enable_stream_partitioning() {
   m_stream_partitioning_enabled = true;
+}
+
+void tag_array::enable_fill_all_sectors() {
+  m_fill_entire_line = true;
 }
   
 void tag_array::set_stream_allocation(unsigned long long streamID, float percentage) {

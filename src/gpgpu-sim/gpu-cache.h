@@ -146,6 +146,12 @@ struct cache_block_t {
   virtual void fill(unsigned time, mem_access_sector_mask_t sector_mask,
                     mem_access_byte_mask_t byte_mask) = 0;
 
+  virtual void allocate_all_sectors(new_addr_type tag, new_addr_type block_addr,
+                        unsigned time,
+                        mem_access_sector_mask_t sector_mask) = 0;
+  virtual void fill_all_sectors(unsigned time, mem_access_sector_mask_t sector_mask,
+                    mem_access_byte_mask_t byte_mask) = 0;
+
   virtual void reset_stream_id() {
     m_stream_id = (unsigned long long) -1; // Reset to default stream ID
   }
@@ -243,6 +249,13 @@ struct line_cache_block : public cache_block_t {
     m_set_readable_on_fill = false;
     m_set_byte_mask_on_fill = false;
   }
+
+  virtual void allocate_all_sectors(new_addr_type tag, new_addr_type block_addr,
+                        unsigned time,
+                        mem_access_sector_mask_t sector_mask) {
+    allocate(tag, block_addr, time, sector_mask);
+  }
+
   virtual void fill(unsigned time, mem_access_sector_mask_t sector_mask,
                     mem_access_byte_mask_t byte_mask) {
     // if(!m_ignore_on_fill_status)
@@ -255,6 +268,12 @@ struct line_cache_block : public cache_block_t {
 
     m_fill_time = time;
   }
+
+  virtual void fill_all_sectors(unsigned time, mem_access_sector_mask_t sector_mask,
+                                mem_access_byte_mask_t byte_mask) {
+    fill(time, sector_mask, byte_mask);
+  }
+
   virtual bool is_invalid_line() { return m_status == INVALID; }
   virtual bool is_valid_line() { return m_status == VALID; }
   virtual bool is_reserved_line() { return m_status == RESERVED; }
@@ -413,6 +432,31 @@ struct sector_cache_block : public cache_block_t {
     m_line_fill_time = 0;
   }
 
+  virtual void allocate_all_sectors(new_addr_type tag, new_addr_type block_addr, unsigned time,
+                                    mem_access_sector_mask_t sector_mask) {
+    // allocate a new line
+    // assert(m_block_addr != 0 && m_block_addr != block_addr);
+    init();
+    m_tag = tag;
+    m_block_addr = block_addr;
+
+    // set all sector stats
+    for (unsigned i = 0; i < SECTOR_CHUNCK_SIZE; ++i) {
+      m_sector_alloc_time[i] = time;
+      m_sector_fill_time[i] = time;
+      m_last_sector_access_time[i] = 0;
+      m_status[i] = RESERVED;
+      m_ignore_on_fill_status[i] = false;
+      m_set_modified_on_fill[i] = false;
+      m_set_readable_on_fill[i] = false;
+    }
+
+    // set line stats
+    m_line_alloc_time = time;  // only set this for the first allocated sector
+    m_line_last_access_time = time;
+    m_line_fill_time = 0;
+  }
+
   virtual void fill(unsigned time, mem_access_sector_mask_t sector_mask,
                     mem_access_byte_mask_t byte_mask) {
     unsigned sidx = get_sector_index(sector_mask);
@@ -430,6 +474,16 @@ struct sector_cache_block : public cache_block_t {
     m_sector_fill_time[sidx] = time;
     m_line_fill_time = time;
   }
+
+  virtual void fill_all_sectors(unsigned time, mem_access_sector_mask_t sector_mask,
+                                mem_access_byte_mask_t byte_mask) {
+    for (unsigned i = 0; i < SECTOR_CHUNCK_SIZE; ++i) {
+      m_readable[i] = true;
+      m_sector_fill_time[i] = time;
+    }
+    m_line_fill_time = time;
+  }
+
   virtual bool is_invalid_line() {
     // all the sectors should be invalid
     for (unsigned i = 0; i < SECTOR_CHUNCK_SIZE; ++i) {
@@ -624,6 +678,8 @@ class cache_config {
 
     // Stream partitioning configuration
     m_stream_partitioning_enabled = false;
+    m_fill_entire_line = false;
+    m_fill_entire_line_on_clean = false;
   }
   void init(char *config, FuncCache status) {
     cache_status = status;
@@ -891,8 +947,12 @@ class cache_config {
   unsigned get_total_size_inKB() const {
     assert(m_valid);
     return (m_assoc * m_nset * m_line_sz) / 1024;
-  }
+  } 
   bool is_streaming() { return m_is_streaming; }
+  bool is_fill_entire_line() { return m_fill_entire_line; }
+  void set_fill_entire_line(bool fill) { m_fill_entire_line = fill; }
+  bool is_fill_entire_line_on_clean() { return m_fill_entire_line_on_clean; }
+  void set_fill_entire_line_on_clean(bool fill) { m_fill_entire_line_on_clean = fill; }
   FuncCache get_cache_status() { return cache_status; }
   void set_allocation_policy(enum allocation_policy_t alloc) {
     m_alloc_policy = alloc;
@@ -917,6 +977,10 @@ class cache_config {
       m_stream_partitioning_enabled = true;
     }
   }
+
+  void enable_fill_entire_line() {
+    m_fill_entire_line = true;
+  }
   
   float get_stream_allocation(unsigned long long streamID) const {
     auto it = m_stream_allocations.find(streamID);
@@ -925,6 +989,10 @@ class cache_config {
   
   bool is_stream_partitioning_enabled() const {
     return m_stream_partitioning_enabled;
+  }
+
+  void set_stream_partitioning_enabled(bool enabled) {
+    m_stream_partitioning_enabled = enabled;
   }
 
  protected:
@@ -945,6 +1013,8 @@ class cache_config {
   unsigned m_sector_sz_log2;
   unsigned original_m_assoc;
   bool m_is_streaming;
+  bool m_fill_entire_line;
+  bool m_fill_entire_line_on_clean;
 
   enum replacement_policy_t m_replacement_policy;  // 'L' = LRU, 'F' = FIFO
   enum write_policy_t
@@ -1090,6 +1160,8 @@ class tag_array {
   
   bool stream_exceeds_allocation(unsigned set_index, unsigned long long streamID) const;
 
+  void enable_fill_all_sectors();
+
   void set_gpu(gpgpu_sim *gpu_) { gpu = gpu_; }
 
   std::string get_name() const { return m_name; }
@@ -1124,6 +1196,8 @@ class tag_array {
   unsigned stream0_wayNum;
   unsigned stream1_wayNum;
 
+  bool m_fill_entire_line;  // if true, fill the entire line on cache fill
+
   // performance counters for calculating the amount of misses within a time
   // window
   unsigned m_prev_snapshot_access;
@@ -1139,6 +1213,13 @@ class tag_array {
   line_table pending_lines;
 
   gpgpu_sim *gpu;
+
+  // Eviction statistics
+  unsigned long long m_evictions;            // total number of cache line evictions
+  unsigned long long m_evictions_no_reuse;   // evictions where the line was never re-used after being filled
+  // Snapshot counters (for windowed statistics)
+  unsigned long long m_prev_snapshot_evictions;
+  unsigned long long m_prev_snapshot_evictions_no_reuse;
 };
 
 class mshr_table {

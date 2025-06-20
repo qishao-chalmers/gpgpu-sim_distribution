@@ -256,7 +256,14 @@ void memory_config::reg_options(class OptionParser *opp) {
   option_parser_register(opp, "-gpgpu_cache:dl2_texture_only", OPT_BOOL,
                          &m_L2_texure_only, "L2 cache used for texture only",
                          "1");
-                         
+  option_parser_register(opp, "-gpgpu_fill_entire_line", OPT_BOOL,
+                         &m_fill_entire_line, 
+                         "Fill entire cache line instead of just sectors in L1/L2 cache (default = no)",
+                         "0");
+  option_parser_register(opp, "-gpgpu_fill_entire_line_on_clean", OPT_BOOL,
+                         &m_fill_entire_line_on_clean, 
+                         "Fill entire cache line on clean instead of just sectors in L1/L2 cache (default = no)",
+                         "0");                       
   // Cache partitioning options
   option_parser_register(
       opp, "-gpgpu_cache_stream_partitioning", OPT_BOOL, &gpgpu_cache_stream_partitioning,
@@ -697,6 +704,9 @@ void gpgpu_sim_config::reg_options(option_parser_t opp) {
                          "terminates gpu simulation early (0 = no limit)", "0");
   option_parser_register(opp, "-gpgpu_max_completed_cta", OPT_INT32,
                          &gpu_max_completed_cta_opt,
+                         "terminates gpu simulation early (0 = no limit)", "0");
+  option_parser_register(opp, "-gpgpu_max_executed_kernel", OPT_INT32,
+                         &gpgpu_max_executed_kernel_num,
                          "terminates gpu simulation early (0 = no limit)", "0");
   option_parser_register(
       opp, "-gpgpu_runtime_stat", OPT_CSTR, &gpgpu_runtime_stat,
@@ -1586,7 +1596,18 @@ void gpgpu_sim::gpu_print_stat(unsigned long long streamID) {
   printf("kernel_stream_id = %llu\n", streamID);
 
   printf("gpu_sim_cycle = %lld\n", gpu_sim_cycle);
+  printf("gpu_core_abs_cycle = %lld\n",gpu_core_abs_cycle);
   printf("gpu_sim_insn = %lld\n", gpu_sim_insn);
+
+  // print out gpu kernel time
+  for (auto iter = gpu_kernel_time.begin(); iter !=gpu_kernel_time.end(); iter++) {
+    for (auto kernel_iter = iter->second.begin(); kernel_iter != iter->second.end(); kernel_iter++) {
+      fprintf(statfout, "gpu_kernel_time[%u][%u] = %lld\n",
+              iter->first, kernel_iter->first,
+              kernel_iter->second.end_cycle -
+              kernel_iter->second.start_cycle);
+    }
+  }
   printf("gpu_ipc = %12.4f\n", (float)gpu_sim_insn / gpu_sim_cycle);
   printf("gpu_tot_sim_cycle = %lld\n", gpu_tot_sim_cycle + gpu_sim_cycle);
   printf("gpu_tot_sim_insn = %lld\n", gpu_tot_sim_insn + gpu_sim_insn);
@@ -1770,6 +1791,14 @@ void gpgpu_sim::gpu_print_stat(unsigned long long streamID) {
   fflush(stdout);
 
   clear_executed_kernel_info();
+
+  executed_kernel_num++;
+  if (m_config.gpgpu_max_executed_kernel_num != 0 &&
+      executed_kernel_num >= m_config.gpgpu_max_executed_kernel_num) {
+    printf(
+        "Terminating GPU simulation early due to max executed kernel limit.\n");
+    exit(0);
+  }
 }
 
 // performance counter that are not local to one shader
@@ -2111,7 +2140,7 @@ void gpgpu_sim::issue_block2core_stream_partitioning() {
   
   unsigned last_issued_1 = m_last_cluster_issue_stream1;
   for (unsigned i = 0; i < m_shader_config->n_simt_clusters/2; i++) {
-    unsigned idx = (i + last_issued_1 + 1) % m_shader_config->n_simt_clusters/2;
+    unsigned idx = (i + last_issued_1 + 1) % (m_shader_config->n_simt_clusters/2);
     unsigned num = m_cluster[idx]->issue_block2core();
     if (num) {
       m_last_cluster_issue_stream1 = idx;
@@ -2122,7 +2151,7 @@ void gpgpu_sim::issue_block2core_stream_partitioning() {
   unsigned last_issued_2 = m_last_cluster_issue_stream2;
   for (unsigned i = m_shader_config->n_simt_clusters/2;
        i < m_shader_config->n_simt_clusters; i++) {
-    unsigned idx = (i + last_issued_2 + 1) % m_shader_config->n_simt_clusters/2
+    unsigned idx = (i + last_issued_2 + 1) % (m_shader_config->n_simt_clusters/2)
                     + m_shader_config->n_simt_clusters/2;
     unsigned num = m_cluster[idx]->issue_block2core();
     if (num) {
@@ -2259,6 +2288,7 @@ void gpgpu_sim::cycle() {
       raise(SIGTRAP);  // Debug breakpoint
     }
     gpu_sim_cycle++;
+    gpu_core_abs_cycle++;
 
     if (g_interactive_debugger_enabled) gpgpu_debug();
 

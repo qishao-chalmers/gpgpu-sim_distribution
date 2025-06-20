@@ -216,6 +216,8 @@ class memory_config {
     m_valid = false;
     gpgpu_dram_timing_opt = NULL;
     gpgpu_L2_queue_config = NULL;
+    m_fill_entire_line = false;
+    m_fill_entire_line_on_clean = false;
     gpgpu_ctx = ctx;
   }
   void init() {
@@ -308,6 +310,10 @@ class memory_config {
 
     m_L2_config.init(&m_address_mapping);
 
+    // Set fill entire line option
+    m_L2_config.set_fill_entire_line(m_fill_entire_line);
+    m_L2_config.set_fill_entire_line_on_clean(m_fill_entire_line_on_clean);
+
     // Cache partitioning options
     if (gpgpu_cache_stream_partitioning) {
       m_L2_config.enable_stream_partitioning();
@@ -334,6 +340,8 @@ class memory_config {
   bool m_valid;
   mutable l2_cache_config m_L2_config;
   bool m_L2_texure_only;
+  bool m_fill_entire_line;  // Fill entire cache line instead of just sectors
+  bool m_fill_entire_line_on_clean;  // Fill entire cache line on clean instead of just sectors
 
   char *gpgpu_dram_timing_opt;
   char *gpgpu_L2_queue_config;
@@ -436,6 +444,8 @@ class gpgpu_sim_config : public power_config,
     m_shader_config.init();
     ptx_set_tex_cache_linesize(m_shader_config.m_L1T_config.get_line_sz());
     m_memory_config.init();
+    m_shader_config.m_L1D_config.set_fill_entire_line(m_memory_config.m_fill_entire_line);
+    m_shader_config.m_L1D_config.set_fill_entire_line_on_clean(m_memory_config.m_fill_entire_line_on_clean);
     init_clock_domains();
     power_config::init();
     Trace::init();
@@ -506,6 +516,7 @@ class gpgpu_sim_config : public power_config,
   unsigned long long gpu_max_insn_opt;
   unsigned gpu_max_cta_opt;
   unsigned gpu_max_completed_cta_opt;
+  unsigned gpgpu_max_executed_kernel_num;
   char *gpgpu_runtime_stat;
   bool gpgpu_flush_l1_cache;
   bool gpgpu_flush_l2_cache;
@@ -784,6 +795,8 @@ class gpgpu_sim : public gpgpu_t {
   unsigned long long gpu_tot_sim_insn;
   unsigned long long gpu_sim_insn_last_update;
   unsigned gpu_sim_insn_last_update_sid;
+  unsigned executed_kernel_num = 0;
+
   occupancy_stats gpu_occupancy;
   occupancy_stats gpu_tot_occupancy;
 

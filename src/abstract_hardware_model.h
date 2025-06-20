@@ -628,6 +628,8 @@ class gpgpu_t {
   unsigned long long gpu_sim_cycle;
   unsigned long long gpu_tot_sim_cycle;
 
+  unsigned long long gpu_core_abs_cycle;
+
   void *gpu_malloc(size_t size);
   void *gpu_mallocarray(size_t count);
   void gpu_memset(size_t dst_start_addr, int c, size_t count);
@@ -1062,6 +1064,10 @@ class inst_t {
     int src[MAX_REG_OPERANDS];
   } arch_reg;
   // int arch_reg[MAX_REG_OPERANDS]; // register number for bank conflict
+  #define WARP_SIZE 32
+  #define MAX_STORE_DATA_REGS 4
+  // Maximum number of registers for store data
+  uint64_t data[WARP_SIZE][MAX_STORE_DATA_REGS];
   // evaluation
   unsigned latency;  // operation latency
   unsigned initiation_interval;
