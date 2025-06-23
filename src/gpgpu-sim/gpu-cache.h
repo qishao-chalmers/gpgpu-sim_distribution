@@ -53,6 +53,7 @@ enum cache_request_status {
   RESERVATION_FAIL,
   SECTOR_MISS,
   MSHR_HIT,
+  EVICTION,
   NUM_CACHE_REQUEST_STATUS
 };
 
@@ -1292,6 +1293,10 @@ struct cache_sub_stats {
   unsigned long long pending_hits;
   unsigned long long res_fails;
 
+  // eviction stats
+  unsigned long long evictions;
+  unsigned long long evictions_no_reuse;
+
   unsigned long long port_available_cycles;
   unsigned long long data_port_busy_cycles;
   unsigned long long fill_port_busy_cycles;
@@ -1302,6 +1307,8 @@ struct cache_sub_stats {
     misses = 0;
     pending_hits = 0;
     res_fails = 0;
+    evictions = 0;
+    evictions_no_reuse = 0;
     port_available_cycles = 0;
     data_port_busy_cycles = 0;
     fill_port_busy_cycles = 0;
@@ -1314,6 +1321,8 @@ struct cache_sub_stats {
     misses += css.misses;
     pending_hits += css.pending_hits;
     res_fails += css.res_fails;
+    evictions += css.evictions;
+    evictions_no_reuse += css.evictions_no_reuse;
     port_available_cycles += css.port_available_cycles;
     data_port_busy_cycles += css.data_port_busy_cycles;
     fill_port_busy_cycles += css.fill_port_busy_cycles;
@@ -1329,6 +1338,8 @@ struct cache_sub_stats {
     ret.misses = misses + cs.misses;
     ret.pending_hits = pending_hits + cs.pending_hits;
     ret.res_fails = res_fails + cs.res_fails;
+    ret.evictions = evictions + cs.evictions;
+    ret.evictions_no_reuse = evictions_no_reuse + cs.evictions_no_reuse;
     ret.port_available_cycles =
         port_available_cycles + cs.port_available_cycles;
     ret.data_port_busy_cycles =
@@ -1354,6 +1365,10 @@ struct cache_sub_stats_pw {
   unsigned read_pending_hits;
   unsigned read_res_fails;
 
+  // eviction stats
+  unsigned long long read_evictions;
+  unsigned long long write_evictions;
+
   cache_sub_stats_pw() { clear(); }
   void clear() {
     accesses = 0;
@@ -1365,6 +1380,8 @@ struct cache_sub_stats_pw {
     read_hits = 0;
     read_pending_hits = 0;
     read_res_fails = 0;
+    read_evictions = 0;
+    write_evictions = 0;
   }
   cache_sub_stats_pw &operator+=(const cache_sub_stats_pw &css) {
     ///
@@ -1377,6 +1394,8 @@ struct cache_sub_stats_pw {
     read_pending_hits += css.read_pending_hits;
     write_res_fails += css.write_res_fails;
     read_res_fails += css.read_res_fails;
+    read_evictions += css.read_evictions;
+    write_evictions += css.write_evictions;
     return *this;
   }
 
@@ -1392,6 +1411,8 @@ struct cache_sub_stats_pw {
     ret.read_pending_hits = read_pending_hits + cs.read_pending_hits;
     ret.write_res_fails = write_res_fails + cs.write_res_fails;
     ret.read_res_fails = read_res_fails + cs.read_res_fails;
+    ret.read_evictions = read_evictions + cs.read_evictions;
+    ret.write_evictions = write_evictions + cs.write_evictions;
     return ret;
   }
 };
@@ -1415,6 +1436,9 @@ class cache_stats {
                     unsigned long long streamID);
   void inc_fail_stats(int access_type, int fail_outcome,
                       unsigned long long streamID);
+
+  void inc_eviction_stats(int access_type, unsigned long long streamID);
+
   enum cache_request_status select_stats_status(
       enum cache_request_status probe, enum cache_request_status access) const;
   unsigned long long &operator()(int access_type, int access_outcome,

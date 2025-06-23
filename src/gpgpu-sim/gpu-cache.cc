@@ -372,6 +372,10 @@ enum cache_request_status tag_array::probe(new_addr_type addr, unsigned &idx,
   }
   if (all_reserved) {
     assert(m_config.m_alloc_policy == ON_MISS);
+    // print out memory request address and failed reasion
+    //printf("Cache %s addr %0#llx, all lines reserved, "
+    //    "not enough space to allocate on miss\n",
+    //    get_name().c_str(), addr);
     return RESERVATION_FAIL;  // miss and not enough space in cache to allocate
                               // on miss
   }
@@ -988,6 +992,20 @@ void cache_stats::inc_fail_stats(int access_type, int fail_outcome,
   m_fail_stats.at(streamID)[access_type][fail_outcome]++;
 }
 
+void cache_stats::inc_eviction_stats(int access_type, unsigned long long streamID) {
+  if (m_stats.find(streamID) == m_stats.end()) {
+    std::vector<std::vector<unsigned long long>> new_val;
+    new_val.resize(NUM_MEM_ACCESS_TYPE);
+    for (unsigned j = 0; j < NUM_MEM_ACCESS_TYPE; ++j) {
+      new_val[j].resize(NUM_CACHE_REQUEST_STATUS, 0);
+    }
+    m_stats.insert(std::pair<unsigned long long,
+                             std::vector<std::vector<unsigned long long>>>(
+        streamID, new_val));
+  }
+  m_stats.at(streamID)[access_type][EVICTION]++;
+}
+
 enum cache_request_status cache_stats::select_stats_status(
     enum cache_request_status probe, enum cache_request_status access) const {
   ///
@@ -1310,6 +1328,9 @@ void cache_stats::get_sub_stats(struct cache_sub_stats &css) const {
 
         if (status == RESERVATION_FAIL)
           t_css.res_fails += m_stats.at(streamID)[type][status];
+
+        if (status == EVICTION)
+          t_css.evictions += m_stats.at(streamID)[type][status];
       }
     }
   }
@@ -1363,6 +1384,15 @@ void cache_stats::get_sub_stats_pw(struct cache_sub_stats_pw &css) const {
           }
         }
 
+        if (status == EVICTION) {
+          if (type == GLOBAL_ACC_R || type == CONST_ACC_R ||
+              type == INST_ACC_R) {
+            t_css.read_evictions += m_stats_pw.at(streamID)[type][status];
+          } else if (type == GLOBAL_ACC_W) {
+            t_css.write_evictions += m_stats_pw.at(streamID)[type][status];
+          }
+        }
+        
         if (status == RESERVATION_FAIL) {
           if (type == GLOBAL_ACC_R || type == CONST_ACC_R ||
               type == INST_ACC_R) {
@@ -1860,6 +1890,8 @@ enum cache_request_status data_cache::wr_miss_wa_naive(
       wb->set_partition(mf->get_tlx_addr().sub_partition);
       send_write_request(wb, cache_event(WRITE_BACK_REQUEST_SENT, evicted),
                          time, events);
+      // update eviction stats
+      m_stats.inc_eviction_stats(mf->get_access_type(), mf->get_streamID());
     }
     return MISS;
   }
@@ -1914,6 +1946,8 @@ enum cache_request_status data_cache::wr_miss_wa_fetch_on_write(
         wb->set_partition(mf->get_tlx_addr().sub_partition);
         send_write_request(wb, cache_event(WRITE_BACK_REQUEST_SENT, evicted),
                            time, events);
+        // update eviction stats
+        m_stats.inc_eviction_stats(mf->get_access_type(), mf->get_streamID());
       }
       return MISS;
     }
@@ -1991,6 +2025,8 @@ enum cache_request_status data_cache::wr_miss_wa_fetch_on_write(
         wb->set_partition(mf->get_tlx_addr().sub_partition);
         send_write_request(wb, cache_event(WRITE_BACK_REQUEST_SENT, evicted),
                            time, events);
+        // update eviction stats
+        m_stats.inc_eviction_stats(mf->get_access_type(), mf->get_streamID());
       }
       return MISS;
     }
@@ -2059,6 +2095,8 @@ enum cache_request_status data_cache::wr_miss_wa_lazy_fetch_on_read(
       wb->set_partition(mf->get_tlx_addr().sub_partition);
       send_write_request(wb, cache_event(WRITE_BACK_REQUEST_SENT, evicted),
                          time, events);
+      // update eviction stats
+      m_stats.inc_eviction_stats(mf->get_access_type(), mf->get_streamID());
     }
     return MISS;
   }
@@ -2142,6 +2180,8 @@ enum cache_request_status data_cache::rd_miss_base(
       wb->set_chip(mf->get_tlx_addr().chip);
       wb->set_partition(mf->get_tlx_addr().sub_partition);
       send_write_request(wb, WRITE_BACK_REQUEST_SENT, time, events);
+      // update eviction stats
+      m_stats.inc_eviction_stats(mf->get_access_type(), mf->get_streamID());
     }
     return MISS;
   }
@@ -2261,6 +2301,9 @@ enum cache_request_status data_cache::access(new_addr_type addr, mem_fetch *mf,
   m_stats.inc_stats_pw(mf->get_access_type(),
                        m_stats.select_stats_status(probe_status, access_status),
                        mf->get_streamID());
+  // print out address, cache_index, and access_status
+  //printf("Cache %s address: %llx, cache_index: %d, probe_status: %d access_status: %d\n",
+  //get_name().c_str(), addr, cache_index, probe_status, access_status);
   return access_status;
 }
 
