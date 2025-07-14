@@ -171,6 +171,12 @@ void gpgpu_functional_sim_config::reg_options(class OptionParser *opp) {
                          &g_ptx_inst_debug_thread_uid,
                          "Thread UID for executed instructions' debug output",
                          "1");
+  //option_parser_register(opp, "-sector_size", OPT_UINT32, &SECTOR_SIZE,
+  //                       "Sector size in bytes (default: 32, options: 32, 64, 128)",
+  //                       "32");
+  //option_parser_register(opp, "-sector_count", OPT_UINT32, &SECTOR_CHUNCK_SIZE,
+  //                       "Number of sectors per cache line (default: 4)",
+  //                       "4");
 }
 
 void gpgpu_functional_sim_config::ptx_set_tex_cache_linesize(
@@ -215,6 +221,10 @@ new_addr_type line_size_based_tag_func(new_addr_type address,
                                        new_addr_type line_size) {
   // gives the tag for an address based on a given line size
   return address & ~(line_size - 1);
+}
+
+uint64_t get_sector_mask_key(const mem_access_sector_mask_t& mask) {
+  return mask.to_ullong(); // Converts to unsigned long long (uint64_t)
 }
 
 const char *mem_access_type_str(enum mem_access_type access_type){
@@ -542,15 +552,15 @@ void warp_inst_t::memory_coalescing_arch(bool is_write,
         new_addr_type block_address =
             line_size_based_tag_func(addr, segment_size);
         unsigned chunk =
-            (addr & 127) / 32;  // which 32-byte chunk within in a 128-byte
+            (addr & 127) / SECTOR_SIZE;  // which 32-byte chunk within in a 128-byte
                                 // chunk does this thread access?
-        transaction_info &info = subwarp_transactions[block_address];
 
         // can only write to one segment
         // it seems like in trace driven, a thread can write to more than one
         // segment assert(block_address ==
         // line_size_based_tag_func(addr+data_size_coales-1,segment_size));
 
+        transaction_info &info = subwarp_transactions[block_address];
         info.chunks.set(chunk);
         info.active.set(thread);
         unsigned idx = (addr & 127);
@@ -564,7 +574,7 @@ void warp_inst_t::memory_coalescing_arch(bool is_write,
           addr = addr + data_size_coales - 1;
           new_addr_type block_address =
               line_size_based_tag_func(addr, segment_size);
-          unsigned chunk = (addr & 127) / 32;
+          unsigned chunk = (addr & 127) / SECTOR_SIZE;
           transaction_info &info = subwarp_transactions[block_address];
           info.chunks.set(chunk);
           info.active.set(thread);
@@ -639,7 +649,7 @@ void warp_inst_t::memory_coalescing_arch_atomic(bool is_write,
       new_addr_type block_address =
           line_size_based_tag_func(addr, segment_size);
       unsigned chunk =
-          (addr & 127) / 32;  // which 32-byte chunk within in a 128-byte chunk
+          (addr & 127) / SECTOR_SIZE;  // which 32-byte chunk within in a 128-byte chunk
                               // does this thread access?
 
       // can only write to one segment
@@ -699,52 +709,110 @@ void warp_inst_t::memory_coalescing_arch_reduce_and_send(
     new_addr_type addr, unsigned segment_size) {
   assert((addr & (segment_size - 1)) == 0);
 
-  const std::bitset<4> &q = info.chunks;
+  const std::bitset<SECTOR_CHUNCK_SIZE> &q = info.chunks;
   assert(q.count() >= 1);
-  std::bitset<2> h;  // halves (used to check if 64 byte segment can be
-                     // compressed into a single 32 byte segment)
+  
+  // Calculate sector size based on configuration
+  unsigned sector_size = SECTOR_SIZE;
+  unsigned sectors_per_segment = segment_size / sector_size;
+  
+  // Create a bitset for halves based on sector size
+  std::bitset<SECTOR_CHUNCK_SIZE / 2> h;  // halves (used to check if larger segment can be
+                     // compressed into a smaller segment)
 
   unsigned size = segment_size;
+
+  new_addr_type addr128 = addr & ~(128 - 1);  // base address for 128-byte segment
+  
+  // Handle 128-byte segments
   if (segment_size == 128) {
-    bool lower_half_used = q[0] || q[1];
-    bool upper_half_used = q[2] || q[3];
-    if (lower_half_used && !upper_half_used) {
-      // only lower 64 bytes used
-      size = 64;
-      if (q[0]) h.set(0);
-      if (q[1]) h.set(1);
-    } else if ((!lower_half_used) && upper_half_used) {
-      // only upper 64 bytes used
-      addr = addr + 64;
-      size = 64;
-      if (q[2]) h.set(0);
-      if (q[3]) h.set(1);
-    } else {
-      assert(lower_half_used && upper_half_used);
+    if (sector_size == 32) {
+      // Original logic for 32-byte sectors
+      bool lower_half_used = q[0] || q[1];
+      bool upper_half_used = q[2] || q[3];
+      if (lower_half_used && !upper_half_used) {
+        // only lower 64 bytes used
+        size = 64;
+        if (q[0]) h.set(0);
+        if (q[1]) h.set(1);
+      } else if ((!lower_half_used) && upper_half_used) {
+        // only upper 64 bytes used
+        addr = addr + 64;
+        size = 64;
+        if (q[2]) h.set(0);
+        if (q[3]) h.set(1);
+      } else {
+        assert(lower_half_used && upper_half_used);
+      }
+    } else if (sector_size == 64) {
+      // For 64-byte sectors, 128-byte segment has 2 sectors
+      bool first_sector_used = q[0];
+      bool second_sector_used = q[1];
+      if (first_sector_used && !second_sector_used) {
+        // only first 64 bytes used
+        size = 64;
+      } else if (!first_sector_used && second_sector_used) {
+        // only second 64 bytes used
+        addr = addr + 64;
+        size = 64;
+      } else {
+        assert(first_sector_used && second_sector_used);
+      }
+    } else if (sector_size == 128) {
+      // For 128-byte sectors, segment is already optimal size
+      // No compression needed
+      size = 128;
     }
-  } else if (segment_size == 64) {
-    // need to set halves
-    if ((addr % 128) == 0) {
-      if (q[0]) h.set(0);
-      if (q[1]) h.set(1);
+  } // Handle 64-byte segments
+  else if (segment_size == 64) {
+    if (sector_size == 32) {
+      // Original logic for 32-byte sectors
+      if ((addr % 128) == 0) {
+        if (q[0]) h.set(0);
+        if (q[1]) h.set(1);
+      } else {
+        assert((addr % 128) == 64);
+        if (q[2]) h.set(0);
+        if (q[3]) h.set(1);
+      }
+    } else if (sector_size == 64) {
+      // For 64-byte sectors, 64-byte segment is already optimal
+      // No compression needed
+    } else if (sector_size == 128) {
+      // For 128-byte sectors, 64-byte segment can be compressed to 32
+      // But this would require special handling
+      // For now, keep as 64 bytes
+      size = 128; // 64 is the minimum size for a segment
+    }
+  } else if (segment_size == 32){
+    if(sector_size == 32) {
+      // For 32-byte sectors, segment is already optimal size
+      // No compression needed
     } else {
-      assert((addr % 128) == 64);
-      if (q[2]) h.set(0);
-      if (q[3]) h.set(1);
+      if (addr + sector_size > addr128 +128) {
+        addr = addr128 + 128 - sector_size; // Adjust address to fit in 128-byte segment
+      }
+      size = sector_size;
     }
   }
+
   if (size == 64) {
-    bool lower_half_used = h[0];
-    bool upper_half_used = h[1];
-    if (lower_half_used && !upper_half_used) {
-      size = 32;
-    } else if ((!lower_half_used) && upper_half_used) {
-      addr = addr + 32;
-      size = 32;
-    } else {
-      assert(lower_half_used && upper_half_used);
+    if (sector_size == 32) {
+        bool lower_half_used = h[0];
+        bool upper_half_used = h[1];
+        if (lower_half_used && !upper_half_used) {
+          size = 32;
+        } else if ((!lower_half_used) && upper_half_used) {
+          addr = addr + 32;
+          size = 32;
+        } else {
+          assert(lower_half_used && upper_half_used);
+        }
     }
   }
+  // size cannot be less than sector size
+  assert(size >= sector_size);
+
   m_accessq.push_back(mem_access_t(access_type, addr, size, is_write,
                                    info.active, info.bytes, info.chunks,
                                    m_config->gpgpu_ctx));

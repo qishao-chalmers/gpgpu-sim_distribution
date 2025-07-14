@@ -411,6 +411,9 @@ void gpgpu_context::print_simulation_time() {
            the_gpgpusim->g_the_gpu->shader_clock() * 1000 / cycles_per_sec);
   }
   fflush(stdout);
+
+  if (h > 2)
+    exit(0);
 }
 
 int gpgpu_context::gpgpu_opencl_ptx_sim_main_perf(kernel_info_t *grid) {

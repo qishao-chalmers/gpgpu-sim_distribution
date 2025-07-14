@@ -569,6 +569,10 @@ void memory_sub_partition::cache_cycle(unsigned cycle) {
   */
   if (!m_L2_dram_queue->full() && !m_icnt_L2_queue->empty()) {
     mem_fetch *mf = m_icnt_L2_queue->top();
+    // temp debug
+    printf("%d l2 cache mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d\n",
+         m_id, mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode());
+    mf->print(stdout, false);
     if (!m_config->m_L2_config.disabled() &&
         ((m_config->m_L2_texure_only && mf->istexture()) ||
          (!m_config->m_L2_texure_only))) {
@@ -664,6 +668,20 @@ void memory_sub_partition::cache_cycle(unsigned cycle) {
     m_icnt_L2_queue->push(mf);
     mf->set_status(IN_PARTITION_ICNT_TO_L2_QUEUE,
                    m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);
+    // temp debug
+    printf("m_icnt_L2_queue : %d push mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d\n",
+         m_id, mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode());
+    mf->print(stdout, false);
+  }
+
+  // temp debug
+  if (!m_rop.empty() && (cycle >= m_rop.front().ready_cycle)) {
+    if (m_icnt_L2_queue->full()) {
+      mem_fetch *mf = m_rop.front().req;
+      printf("ROP delay queue m_icnt_L2_queue full, mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d\n",
+         m_id, mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode());
+      mf->print(stdout, false);
+    }
   }
 }
 
@@ -863,10 +881,20 @@ void memory_sub_partition::push(mem_fetch *m_req, unsigned long long cycle) {
   if (m_req) {
     m_stats->memlatstat_icnt2mem_pop(m_req);
     std::vector<mem_fetch *> reqs;
-    if (m_config->m_L2_config.m_cache_type == SECTOR)
+    if (m_config->m_L2_config.m_cache_type == SECTOR) {
       reqs = breakdown_request_to_sector_requests(m_req);
-    else
+      // temp debug
+      // m_req is breaked into the following reqs
+      for (unsigned i = 0; i < reqs.size(); ++i) {
+        printf("m_req is breaked into the following reqs: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d m_req: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d\n",
+        reqs[i], reqs[i]->get_data_size(), reqs[i]->get_addr(), reqs[i]->get_dynamic_fetch_mode(),
+        m_req, m_req->get_data_size(), m_req->get_addr(), m_req->get_dynamic_fetch_mode());
+        reqs[i]->print(stdout, false);
+        m_req->print(stdout, false);
+      }
+    } else {
       reqs.push_back(m_req);
+    }
 
     for (unsigned i = 0; i < reqs.size(); ++i) {
       mem_fetch *req = reqs[i];

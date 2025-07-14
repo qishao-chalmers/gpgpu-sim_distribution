@@ -217,7 +217,11 @@ class memory_config {
     gpgpu_dram_timing_opt = NULL;
     gpgpu_L2_queue_config = NULL;
     m_fill_entire_line = false;
-    m_fill_entire_line_on_clean = false;
+    m_fill_entire_line_on_cleanl1 = false;
+    m_fill_entire_line_on_cleanl2 = false;
+    collect_sector_stats = false;
+    m_dynamic_fetch_mem = false;
+    m_dynamic_fetch_size = 128;
     gpgpu_ctx = ctx;
   }
   void init() {
@@ -312,7 +316,8 @@ class memory_config {
 
     // Set fill entire line option
     m_L2_config.set_fill_entire_line(m_fill_entire_line);
-    m_L2_config.set_fill_entire_line_on_clean(m_fill_entire_line_on_clean);
+    m_L2_config.set_fill_entire_line_on_clean(m_fill_entire_line_on_cleanl2);
+    m_L2_config.set_collect_sector_stats(collect_sector_stats);
 
     // Cache partitioning options
     if (gpgpu_cache_stream_partitioning) {
@@ -341,7 +346,11 @@ class memory_config {
   mutable l2_cache_config m_L2_config;
   bool m_L2_texure_only;
   bool m_fill_entire_line;  // Fill entire cache line instead of just sectors
-  bool m_fill_entire_line_on_clean;  // Fill entire cache line on clean instead of just sectors
+  bool m_fill_entire_line_on_cleanl1;  // Fill entire l1 cache line on clean instead of just sectors
+  bool m_fill_entire_line_on_cleanl2;// Fill entire l2 cache line on clean instead of just sectors
+  bool collect_sector_stats;  // collect sector stats for sector cache
+  bool m_dynamic_fetch_mem;
+  unsigned m_dynamic_fetch_size;
 
   char *gpgpu_dram_timing_opt;
   char *gpgpu_L2_queue_config;
@@ -445,7 +454,10 @@ class gpgpu_sim_config : public power_config,
     ptx_set_tex_cache_linesize(m_shader_config.m_L1T_config.get_line_sz());
     m_memory_config.init();
     m_shader_config.m_L1D_config.set_fill_entire_line(m_memory_config.m_fill_entire_line);
-    m_shader_config.m_L1D_config.set_fill_entire_line_on_clean(m_memory_config.m_fill_entire_line_on_clean);
+    m_shader_config.m_L1D_config.set_fill_entire_line_on_clean(m_memory_config.m_fill_entire_line_on_cleanl1);
+    m_shader_config.m_L1D_config.set_collect_sector_stats(m_memory_config.collect_sector_stats);
+    m_shader_config.m_L1D_config.set_dynamic_fetch_mem(m_memory_config.m_dynamic_fetch_mem);
+    m_shader_config.m_L1D_config.set_dynamic_fetch_size(m_memory_config.m_dynamic_fetch_size);
     init_clock_domains();
     power_config::init();
     Trace::init();

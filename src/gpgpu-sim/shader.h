@@ -1405,6 +1405,7 @@ class ldst_unit : public pipelined_simd_unit {
   void get_L1D_sub_stats(struct cache_sub_stats &css) const;
   void get_L1C_sub_stats(struct cache_sub_stats &css) const;
   void get_L1T_sub_stats(struct cache_sub_stats &css) const;
+  void print_sector_mask_stats(FILE *stream) const;
 
  protected:
   ldst_unit(mem_fetch_interface *icnt,
@@ -1642,6 +1643,10 @@ class shader_core_config : public core_config {
   unsigned gpgpu_num_sched_per_core;
   int gpgpu_max_insn_issue_per_warp;
   bool gpgpu_dual_issue_diff_exec_units;
+
+  bool gpgpu_dynamic_fetch_mem;
+
+  unsigned gpgpu_dynamic_fetch_size;
 
   // op collector
   bool enable_specialized_operand_collector;
@@ -2139,6 +2144,8 @@ class shader_core_ctx : public core_t {
   void get_L1D_sub_stats(struct cache_sub_stats &css) const;
   void get_L1C_sub_stats(struct cache_sub_stats &css) const;
   void get_L1T_sub_stats(struct cache_sub_stats &css) const;
+  void print_sector_mask_stats(FILE *stream) const;
+  void print(FILE *fp) const;
 
   void get_icnt_power_stats(long &n_simt_to_mem, long &n_mem_to_simt) const;
 
@@ -2425,7 +2432,8 @@ class shader_core_ctx : public core_t {
   }
   bool check_if_non_released_reduction_barrier(warp_inst_t &inst);
 
- protected:
+ //protected:
+ public:
   unsigned inactive_lanes_accesses_sfu(unsigned active_count, double latency) {
     return (((32 - active_count) >> 1) * latency) +
            (((32 - active_count) >> 3) * latency) +
@@ -2631,7 +2639,7 @@ class simt_core_cluster {
   void update_icnt_stats(class mem_fetch *mf);
 
   // for perfect memory interface
-  bool response_queue_full() {
+  bool response_queue_full() const {
     return (m_response_fifo.size() >= m_config->n_simt_ejection_buffer_size);
   }
   void push_response_fifo(class mem_fetch *mf) {
@@ -2643,6 +2651,8 @@ class simt_core_cluster {
   unsigned max_cta(const kernel_info_t &kernel);
   unsigned get_not_completed() const;
   void print_not_completed(FILE *fp) const;
+  void print_not_completed_detail(FILE *fp) const;
+  void print_core_detail(FILE *fp) const;
   unsigned get_n_active_cta() const;
   unsigned get_n_active_sms() const;
   gpgpu_sim *get_gpu() { return m_gpu; }
@@ -2656,6 +2666,7 @@ class simt_core_cluster {
   void get_L1D_sub_stats(struct cache_sub_stats &css) const;
   void get_L1C_sub_stats(struct cache_sub_stats &css) const;
   void get_L1T_sub_stats(struct cache_sub_stats &css) const;
+  void print_sector_mask_stats(FILE *stream) const;
 
   void get_icnt_stats(long &n_simt_to_mem, long &n_mem_to_simt) const;
   float get_current_occupancy(unsigned long long &active,

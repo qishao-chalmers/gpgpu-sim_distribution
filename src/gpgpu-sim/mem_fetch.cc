@@ -76,6 +76,9 @@ mem_fetch::mem_fetch(const mem_access_t &access, const warp_inst_t *inst,
     m_raw_addr.chip = m_original_mf->get_tlx_addr().chip;
     m_raw_addr.sub_partition = m_original_mf->get_tlx_addr().sub_partition;
   }
+
+  //printf("mem_fetch::mem_fetch: uid=%u, sid%02u:w%02u, address=0x%llx, size=%u\n",
+  //       m_request_uid, m_sid, m_wid, get_addr(), m_data_size);
 }
 
 mem_fetch::~mem_fetch() { m_status = MEM_FETCH_DELETED; }
@@ -95,8 +98,10 @@ void mem_fetch::print(FILE *fp, bool print_inst) const {
   //   fprintf(fp, " <NULL mem_fetch pointer>\n");
   //   return;
   // }
-  fprintf(fp, "  mf: uid=%6u, sid%02u:w%02u, part=%u, ", m_request_uid, m_sid,
-          m_wid, m_raw_addr.chip);
+  fprintf(fp, "  mf: uid=%6u, sid%02u:w%02u, part=%u, dynamic_fetch_mode=%d ",
+          m_request_uid, m_sid, m_wid, m_raw_addr.chip, dynamic_fetch_mode);
+  fprintf(fp, "fetchsize/org: %d/%d, fetchaddr/org: %lx/%lx ",
+    m_fetch_size, m_data_size, m_fetch_addr, m_access.get_addr());
   m_access.print(fp);
   if ((unsigned)m_status < NUM_MEM_REQ_STAT)
     fprintf(fp, " status = %s (%llu), ", Status_str[m_status], m_status_change);

@@ -42,7 +42,7 @@
 const char *cache_request_status_str(enum cache_request_status status) {
   static const char *static_cache_request_status_str[] = {
       "HIT",         "HIT_RESERVED", "MISS", "RESERVATION_FAIL",
-      "SECTOR_MISS", "MSHR_HIT"};
+      "SECTOR_MISS", "MSHR_HIT" ,"EVICTION",};
 
   assert(sizeof(static_cache_request_status_str) / sizeof(const char *) ==
          NUM_CACHE_REQUEST_STATUS);
@@ -262,7 +262,7 @@ void tag_array::remove_pending_line(mem_fetch *mf) {
 
 enum cache_request_status tag_array::probe(new_addr_type addr, unsigned &idx,
                                            mem_fetch *mf, bool is_write,
-                                           bool probe_mode) const {
+                                           bool probe_mode){
   mem_access_sector_mask_t mask = mf->get_access_sector_mask();
   return probe(addr, idx, mask, is_write, probe_mode, mf);
 }
@@ -284,10 +284,75 @@ bool tag_array::stream_reserved_exceeds_allocation(new_addr_type addr, unsigned 
   return false;
 }
 
+void tag_array::update_sector_mask_stats(mem_access_sector_mask_t sector_mask, uint64_t addr,
+                                         warp_inst_t inst){
+  auto it = addr_to_sector_mask.find(addr);
+  uint64_t num_sector_mask = get_sector_mask_key(sector_mask);
+  if (it != addr_to_sector_mask.end()) {
+    if (it->second == num_sector_mask) {
+      return;
+    } else {
+      if (sector_mask_stats[num_sector_mask] > 0) {
+        sector_mask_stats[num_sector_mask]--;
+      } else {
+        sector_mask_stats.erase(num_sector_mask);
+      }
+    }
+  }
+  addr_to_sector_mask[addr] = num_sector_mask;
+  sector_mask_stats[num_sector_mask]++;
+  addr_to_pc_set[addr].insert(inst.get_pc());
+  inst_to_mask_set[inst.get_pc()].insert(num_sector_mask);
+  pc_to_inst_set[inst.get_pc()] = inst;
+}
+
+void tag_array::print_sector_mask_stats(FILE *stream){
+  if (addr_to_sector_mask.size() == 0)
+    return;
+  for (auto it = sector_mask_stats.begin(); it != sector_mask_stats.end(); it++) {
+    std::bitset<4> sector_mask(it->first);
+    fprintf(stream, "%s sector_mask: %s, count: %d\n",
+    __func__, sector_mask.to_string().c_str(), it->second);
+  }
+
+  for (auto it = addr_to_pc_set.begin(); it != addr_to_pc_set.end(); it++) {
+    std::bitset<4> sector_mask(addr_to_sector_mask[it->first]);
+    fprintf(stream, "%s addr: %0#llx sector_mask: %s ",
+            __func__, it->first,sector_mask.to_string().c_str());
+
+    for (auto pc_it = it->second.begin(); pc_it != it->second.end(); pc_it++) {
+      auto& inst = pc_to_inst_set[*pc_it];
+      inst.print_pc(stream);
+    }
+    fprintf(stream, "\n");
+  }
+
+  for (auto it = inst_to_mask_set.begin(); it != inst_to_mask_set.end(); it++) {
+    fprintf(stream, "%s inst: %0#llx, mask: %d ", __func__, it->first, it->second.size());
+    for (auto mask_it = it->second.begin(); mask_it != it->second.end(); mask_it++) {
+      std::bitset<4> sector_mask(*mask_it);
+      fprintf(stream, "  mask: %s", sector_mask.to_string().c_str());
+      // print out the inst
+      warp_inst_t& inst = pc_to_inst_set[it->first];
+      inst.print_pc(stream);
+      fprintf(stream," ");
+    }
+    fprintf(stream, "\n");
+  }
+  fprintf(stream, "%s total sector mask count: %d\n", __func__, sector_mask_stats.size());
+  fprintf(stream, "%s total addr count: %d\n", __func__, addr_to_sector_mask.size());
+
+  sector_mask_stats.clear();
+  addr_to_sector_mask.clear();
+  addr_to_pc_set.clear();
+  inst_to_mask_set.clear();
+  pc_to_inst_set.clear();
+}
+
 enum cache_request_status tag_array::probe(new_addr_type addr, unsigned &idx,
                                            mem_access_sector_mask_t mask,
                                            bool is_write, bool probe_mode,
-                                           mem_fetch *mf) const {
+                                           mem_fetch *mf){
   // assert( m_config.m_write_policy == READ_ONLY );
   unsigned set_index = m_config.set_index(addr);
   new_addr_type tag = m_config.tag(addr);
@@ -305,19 +370,23 @@ enum cache_request_status tag_array::probe(new_addr_type addr, unsigned &idx,
     if (line->m_tag == tag && line->m_stream_id == streamID) {
       if (line->get_status(mask) == RESERVED) {
         idx = index;
+        line->increment_access_count(mask);
         return HIT_RESERVED;
       } else if (line->get_status(mask) == VALID) {
         idx = index;
+        line->increment_access_count(mask);
         return HIT;
       } else if (line->get_status(mask) == MODIFIED) {
         if ((!is_write && line->is_readable(mask)) || is_write) {
           idx = index;
+          line->increment_access_count(mask);
           return HIT;
         } else {
           idx = index;
           if (m_config.is_fill_entire_line()) {
             line->set_m_readable(true, mask);
             line->set_status(VALID, mask);
+            line->increment_access_count(mask);
             return HIT;
           } else {
             return SECTOR_MISS;
@@ -330,6 +399,9 @@ enum cache_request_status tag_array::probe(new_addr_type addr, unsigned &idx,
             m_config.is_fill_entire_line_on_clean()) {
           line->set_m_readable(true, mask);
           line->set_status(VALID, mask);
+          line->increment_access_count(mask);
+          update_sector_mask_stats(line->get_valid_sector_mask(), line->m_block_addr,
+                                   mf->get_inst());
           return HIT;
         } else {
           return SECTOR_MISS;
@@ -1517,6 +1589,9 @@ void baseline_cache::cycle() {
     if (!m_memport->full(mf->size(), mf->get_is_write())) {
       m_miss_queue.pop_front();
       m_memport->push(mf);
+      printf("%s push mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d\n",
+         get_name().c_str(), mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode());
+      mf->print(stdout, false);
     }
   }
   bool data_port_busy = !m_bandwidth_management.data_port_free();
@@ -1530,12 +1605,22 @@ void baseline_cache::cycle() {
 void baseline_cache::fill(mem_fetch *mf, unsigned time) {
   if (m_config.m_mshr_type == SECTOR_ASSOC) {
     assert(mf->get_original_mf());
-    extra_mf_fields_lookup::iterator e =
+    extra_mf_fields_lookup::iterator e_org =
         m_extra_mf_fields.find(mf->get_original_mf());
-    assert(e != m_extra_mf_fields.end());
-    e->second.pending_read--;
+      //print out mf detailed information
+    /*
+    printf("%s org mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d pending_read=%d fill\n",
+    get_name().c_str(), mf->get_original_mf(),
+    mf->get_original_mf()->get_data_size(),
+    mf->get_original_mf()->get_addr(),
+    mf->get_original_mf()->get_dynamic_fetch_mode(),
+    e_org->second.pending_read);
+    mf->get_original_mf()->print(stdout, false);
+    assert(e_org != m_extra_mf_fields.end());
+    */
+    e_org->second.pending_read--;
 
-    if (e->second.pending_read > 0) {
+    if (e_org->second.pending_read > 0) {
       // wait for the other requests to come back
       delete mf;
       return;
@@ -1546,11 +1631,28 @@ void baseline_cache::fill(mem_fetch *mf, unsigned time) {
     }
   }
 
+  //print out mf detailed information
+  printf("%s mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d base cache fill\n",
+         get_name().c_str(), mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode());
+  if (mf->get_original_mf() != nullptr) {
+    mf->get_original_mf()->print(stdout, false);
+  }
+  mf->print(stdout, false);
+
   extra_mf_fields_lookup::iterator e = m_extra_mf_fields.find(mf);
-  assert(e != m_extra_mf_fields.end());
-  assert(e->second.m_valid);
+  if (m_config.m_dynamic_fetch_mem && mf->get_original_mf() != nullptr) {
+    e = m_extra_mf_fields.find(mf->get_original_mf());
+  } else {
+    e = m_extra_mf_fields.find(mf);
+  }
+  if (e == m_extra_mf_fields.end() || !e->second.m_valid) {
+    printf("error: e == m_extra_mf_fields.end() || !e->second.m_valid\n");
+    assert(0);
+  }
   mf->set_data_size(e->second.m_data_size);
   mf->set_addr(e->second.m_addr);
+  printf("mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d\n",
+         mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode());
   if (m_config.m_alloc_policy == ON_MISS)
     m_tag_array->fill(e->second.m_cache_index, time, mf);
   else if (m_config.m_alloc_policy == ON_FILL) {
@@ -1571,6 +1673,10 @@ void baseline_cache::fill(mem_fetch *mf, unsigned time) {
     block->set_byte_mask(mf);
   }
   m_extra_mf_fields.erase(mf);
+  // print out mf detailed information
+  printf("%s mf: %p, data_size/original_data_size: %d/%d, addr/original_addr: %lx/%lx, dynamic_fetch_mode=%d erase from m_extra_mf_fields\n",
+         get_name().c_str(), mf, mf->get_data_size(), mf->get_original_data_size(), mf->get_addr(), mf->get_original_addr(), mf->get_dynamic_fetch_mode());
+  mf->print(stdout, false);
   m_bandwidth_management.use_fill_port(mf);
 }
 
@@ -1667,6 +1773,9 @@ void baseline_cache::send_read_request(new_addr_type addr,
       m_tag_array->access(block_addr, time, cache_index, wb, evicted, mf);
 
     m_mshrs.add(mshr_addr, mf);
+    printf("mshr_hit && mshr_avail mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d\n",
+         mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode());
+    mf->print(stdout, false);
     m_stats.inc_stats(mf->get_access_type(), MSHR_HIT, mf->get_streamID());
     do_miss = true;
 
@@ -1678,8 +1787,25 @@ void baseline_cache::send_read_request(new_addr_type addr,
       m_tag_array->access(block_addr, time, cache_index, wb, evicted, mf);
 
     m_mshrs.add(mshr_addr, mf);
-    m_extra_mf_fields[mf] = extra_mf_fields(
-        mshr_addr, mf->get_addr(), cache_index, mf->get_data_size(), m_config);
+    mem_fetch *temp = nullptr;
+    temp = mf->get_original_mf();
+    if (temp!=nullptr) {
+      m_extra_mf_fields[temp] = extra_mf_fields(
+        mshr_addr, temp->get_addr(), cache_index, temp->get_data_size(), m_config);
+      // print out mf detailed information
+      printf("%s org mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d, cache_index: %d, mshr_addr: %lx into m_extra_mf_fields\n",
+        get_name().c_str(), temp, temp->get_data_size(), temp->get_addr(), temp->get_dynamic_fetch_mode(), cache_index, mshr_addr);
+      temp->print(stdout, false);
+    } else {
+      m_extra_mf_fields[mf] = extra_mf_fields(
+      mshr_addr, mf->get_addr(), cache_index, mf->get_data_size(), m_config);
+      // print out mf detailed information
+      // use mf->print to print out the mf detailed information
+      printf("%s mf: %p, data_size/original_data_size: %d/%d, addr/original_addr: %lx/%lx, dynamic_fetch_mode=%d, cache_index: %d, mshr_addr: %lx into m_extra_mf_fields\n",
+      get_name().c_str(), mf, mf->get_data_size(), mf->get_original_data_size(), mf->get_addr(), mf->get_original_addr(), mf->get_dynamic_fetch_mode(), cache_index, mshr_addr);
+      mf->print(stdout, false);
+    }
+
     mf->set_data_size(m_config.get_atom_sz());
     mf->set_addr(mshr_addr);
     m_miss_queue.push_back(mf);
@@ -2287,7 +2413,8 @@ enum cache_request_status data_cache::process_tag_probe(
 enum cache_request_status data_cache::access(new_addr_type addr, mem_fetch *mf,
                                              unsigned time,
                                              std::list<cache_event> &events) {
-  assert(mf->get_data_size() <= m_config.get_atom_sz());
+  //In dynamic fetch mode, the 
+  //assert(mf->get_data_size() <= m_config.get_atom_sz());
   bool wr = mf->get_is_write();
   new_addr_type block_addr = m_config.block_addr(addr);
   unsigned cache_index = (unsigned)-1;
@@ -2340,8 +2467,7 @@ enum cache_request_status tex_cache::access(new_addr_type addr, mem_fetch *mf,
                                             std::list<cache_event> &events) {
   if (m_fragment_fifo.full() || m_request_fifo.full() || m_rob.full())
     return RESERVATION_FAIL;
-
-  assert(mf->get_data_size() <= m_config.get_line_sz());
+  //assert(mf->get_data_size() <= m_config.get_line_sz());
 
   // at this point, we will accept the request : access tags and immediately
   // allocate line
@@ -2358,6 +2484,9 @@ enum cache_request_status tex_cache::access(new_addr_type addr, mem_fetch *mf,
     // we need to send a memory request...
     unsigned rob_index = m_rob.push(rob_entry(cache_index, mf, block_addr));
     m_extra_mf_fields[mf] = extra_mf_fields(rob_index, m_config);
+    // print out mf detailed information
+    //printf("tex cache mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d, cache_index: %d, mshr_addr: %lx into m_extra_mf_fields\n",
+    //     mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode(), cache_index, block_addr);
     mf->set_data_size(m_config.get_line_sz());
     m_tags.fill(cache_index, time, mf);  // mark block as valid
     m_request_fifo.push(mf);
@@ -2435,6 +2564,10 @@ void tex_cache::fill(mem_fetch *mf, unsigned time) {
       delete temp;
     }
   }
+
+  // print out mf detailed information
+  //printf("mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d texture cache fill\n",
+  //      mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode());
 
   extra_mf_fields_lookup::iterator e = m_extra_mf_fields.find(mf);
   assert(e != m_extra_mf_fields.end());

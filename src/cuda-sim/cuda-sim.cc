@@ -2605,6 +2605,9 @@ void cuda_sim::gpgpu_cuda_ptx_sim_main_func(kernel_info_t &kernel,
   printf("gpgpu_simulation_rate = %u (inst/sec)\n",
          (unsigned)(g_ptx_sim_num_insn / elapsed_time));
   fflush(stdout);
+
+  if (hrs > 2)
+    exit(0);
 }
 
 void functionalCoreSim::initializeCTA(unsigned ctaid_cp) {

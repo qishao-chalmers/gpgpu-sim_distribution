@@ -1861,6 +1861,10 @@ void ldst_unit::get_L1T_sub_stats(struct cache_sub_stats &css) const {
   if (m_L1T) m_L1T->get_sub_stats(css);
 }
 
+void ldst_unit::print_sector_mask_stats(FILE *stream) const {
+  if (m_L1D) m_L1D->print_sector_mask_stats(stream);
+}
+
 // Add this function to unset depbar
 void shader_core_ctx::unset_depbar(const warp_inst_t &inst) {
   bool done_flag = true;
@@ -2076,6 +2080,53 @@ mem_stage_stall_type ldst_unit::process_memory_access_queue_l1cache(
                                     m_core->get_gpu()->gpu_tot_sim_cycle);
       unsigned bank_id = m_config->m_L1D_config.set_bank(mf->get_addr());
       assert(bank_id < m_config->m_L1D_config.l1_banks);
+
+      if (m_config->gpgpu_dynamic_fetch_mem
+        && mf->get_dynamic_fetch_mode() == false) {
+        new_addr_type orgAddr = mf->get_addr();
+        new_addr_type newAddr = mf->get_addr();
+        uint32_t org_mf_size = mf->get_data_size();
+        uint32_t mf_size = org_mf_size;
+        mf->set_dynamic_fetch_mode(true);
+
+        // we align the fetch size to the dynamic fetch size
+        // and guarantee that the address and the dynamic fetch size does not
+        // cross the 128B cache line size boundary
+
+        if (m_config->gpgpu_dynamic_fetch_size == 128) {
+          newAddr = newAddr & ~0x7f;
+          mf_size = 128;
+          assert(SECTOR_SIZE == 32);
+          mf->set_dynamic_fetch_sector_mask(0xf);
+        } else if (m_config->gpgpu_dynamic_fetch_size == 64) {
+          if (org_mf_size < m_config->gpgpu_dynamic_fetch_size) {
+            new_addr_type addr128 = newAddr & ~0x7f;
+            if (orgAddr + m_config->gpgpu_dynamic_fetch_size > addr128 + 128) {
+              newAddr = addr128 + 128 - m_config->gpgpu_dynamic_fetch_size;
+            }
+            mf_size = 64;
+            assert(SECTOR_SIZE == 32);
+            // according to the newAddr, set the sector mask for 64 bytes
+            new_addr_type sector_start_id = (newAddr & 0x7f) >>5;
+            mem_access_sector_mask_t mask;
+            mask.set(sector_start_id);
+            mask.set(sector_start_id + 1);
+            mf->set_dynamic_fetch_sector_mask(mask);
+          }
+        }
+
+        mf->set_fetch_data_size(mf_size);
+        mf->set_fetch_addr(newAddr);
+
+        if (orgAddr != mf->get_addr() || 
+            org_mf_size != mf_size) {
+            printf(
+              "%s Dynamic fetch mode enabled for mf %p, orgAddr=%#lx, newAddr=%#lx, "
+              "org_size/fetch_size=%u/%u sector_mask=%x\n",
+              cache->get_name().c_str(), mf, orgAddr, newAddr, org_mf_size, mf_size,
+              mf->get_access_sector_mask().to_ulong());
+        }     
+      }
 
       if ((l1_latency_queue[bank_id][m_config->m_L1D_config.l1_latency - 1]) ==
           NULL) {
@@ -2338,13 +2389,17 @@ void ldst_unit::fill(mem_fetch *mf) {
 }
 
 void ldst_unit::flush() {
-  // Flush L1D cache
-  m_L1D->flush();
+  if (m_L1D != NULL) {
+    // Flush L1D cache
+    m_L1D->flush();
+  }
 }
 
 void ldst_unit::invalidate() {
-  // Flush L1D cache
-  m_L1D->invalidate();
+  if (m_L1D != NULL) {
+    // Flush L1D cache
+    m_L1D->invalidate();
+  }
 }
 
 simd_function_unit::simd_function_unit(const shader_core_config *config) {
@@ -3178,6 +3233,11 @@ void gpgpu_sim::shader_print_cache_stats(FILE *fout) const {
             total_css.pending_hits);
     fprintf(fout, "\tL1T_total_cache_reservation_fails = %llu\n",
             total_css.res_fails);
+
+    fprintf(fout, "L1T_sector_mask_stats:\n");
+    for (unsigned i = 0; i < m_shader_config->n_simt_clusters; ++i) {
+      m_cluster[i]->print_sector_mask_stats(fout);
+    }
   }
 }
 
@@ -4030,6 +4090,9 @@ bool shader_core_ctx::ldst_unit_response_buffer_full() const {
 
 void shader_core_ctx::accept_ldst_unit_response(mem_fetch *mf) {
   m_ldst_unit->fill(mf);
+  printf("accept_ldst_unit_response mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d\n",
+         mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode());
+  mf->print(stdout, true);
 }
 
 void shader_core_ctx::store_ack(class mem_fetch *mf) {
@@ -4043,6 +4106,10 @@ void shader_core_ctx::store_ack(class mem_fetch *mf) {
 void shader_core_ctx::print_cache_stats(FILE *fp, unsigned &dl1_accesses,
                                         unsigned &dl1_misses) {
   m_ldst_unit->print_cache_stats(fp, dl1_accesses, dl1_misses);
+}
+
+void shader_core_ctx::print(FILE *fp) const {
+  m_ldst_unit->print(fp);
 }
 
 void shader_core_ctx::get_cache_stats(cache_stats &cs) {
@@ -4062,6 +4129,10 @@ void shader_core_ctx::get_L1C_sub_stats(struct cache_sub_stats &css) const {
 }
 void shader_core_ctx::get_L1T_sub_stats(struct cache_sub_stats &css) const {
   m_ldst_unit->get_L1T_sub_stats(css);
+}
+
+void shader_core_ctx::print_sector_mask_stats(FILE *stream) const {
+  m_ldst_unit->print_sector_mask_stats(stream);
 }
 
 void shader_core_ctx::get_icnt_power_stats(long &n_simt_to_mem,
@@ -4126,6 +4197,11 @@ void shd_warp_t::print(FILE *fout) const {
     fprintf(fout, " active=%s", m_active_threads.to_string().c_str());
     fprintf(fout, " last fetched @ %5llu", m_last_fetch);
     if (m_imiss_pending) fprintf(fout, " i-miss pending");
+    if (m_stores_outstanding) fprintf(fout, " store pending");
+    if (m_waiting_ldgsts) fprintf(fout, " ldgsts pending");
+    if (m_n_atomic > 0) fprintf(fout, " atomic pending");
+    if (m_membar) fprintf(fout, " membar pending");
+    if (m_done_exit) fprintf(fout, " done exit");
     fprintf(fout, "\n");
   }
 }
@@ -4514,6 +4590,32 @@ void simt_core_cluster::print_not_completed(FILE *fp) const {
   }
 }
 
+// print out response fifo
+void simt_core_cluster::print_not_completed_detail(FILE *fp) const {
+  fprintf(fp,"response fifo: size=%u full=%d\n", m_response_fifo.size(),
+          response_queue_full());
+  for (auto mf : m_response_fifo) {
+     fprintf(fp, "%u %u %u %u %u\n",
+     mf->get_sid(), mf->get_addr(), mf->get_data_size(), mf->get_type(),
+     mf->get_fetch_data_size());
+  }
+  fprintf(fp, "warpVec:\n");
+  for (unsigned i = 0; i < m_config->n_simt_cores_per_cluster; i++) {
+    auto& warpVec = m_core[i]->m_warp;
+    // print out instruction in warpVec
+    for (auto warp : warpVec) {
+      warp->print(fp);
+      fprintf(fp, "\n");
+    }
+  }
+}
+
+void simt_core_cluster::print_core_detail(FILE *fp) const {
+  for (unsigned i = 0; i < m_config->n_simt_cores_per_cluster; i++) {
+    m_core[i]->print(fp);
+  }
+}
+
 float simt_core_cluster::get_current_occupancy(
     unsigned long long &active, unsigned long long &total) const {
   float aggregate = 0.f;
@@ -4797,7 +4899,6 @@ void sst_simt_core_cluster::icnt_cycle_SST() {
                                       ->SST_pop_mem_reply(m_cluster_id));
     if (!mf) return;
     assert(mf->get_tpc() == m_cluster_id);
-
     // do atomic here
     // For now, we execute atomic when the mem reply comes back
     // This needs to be validated
@@ -4902,6 +5003,12 @@ void simt_core_cluster::get_L1T_sub_stats(struct cache_sub_stats &css) const {
     total_css += temp_css;
   }
   css = total_css;
+}
+
+void simt_core_cluster::print_sector_mask_stats(FILE *stream) const {
+  for (unsigned i = 0; i < m_config->n_simt_cores_per_cluster; ++i) {
+    m_core[i]->print_sector_mask_stats(stream);
+  }
 }
 
 void exec_shader_core_ctx::checkExecutionStatusAndUpdate(warp_inst_t &inst,

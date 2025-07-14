@@ -81,13 +81,32 @@ class mem_fetch {
   void set_partition(unsigned sub_partition_id) {
     m_raw_addr.sub_partition = sub_partition_id;
   }
-  unsigned get_data_size() const { return m_data_size; }
+  unsigned get_data_size() const {
+    return dynamic_fetch_mode ? m_fetch_size : m_data_size;
+  }
   void set_data_size(unsigned size) { m_data_size = size; }
   unsigned get_ctrl_size() const { return m_ctrl_size; }
-  unsigned size() const { return m_data_size + m_ctrl_size; }
+  unsigned size() const {
+    return dynamic_fetch_mode ? m_fetch_size + m_ctrl_size :
+                                m_data_size + m_ctrl_size;
+  }
+
+  void set_fetch_data_size(unsigned size) {
+    m_fetch_size = size;
+  }
+  unsigned get_fetch_data_size() const { return m_fetch_size;}
+  bool is_load() const { return m_type == READ_REQUEST; }
+  bool is_store() const { return m_type == WRITE_REQUEST; }
   bool is_write() { return m_access.is_write(); }
   void set_addr(new_addr_type addr) { m_access.set_addr(addr); }
-  new_addr_type get_addr() const { return m_access.get_addr(); }
+  new_addr_type get_addr() const {
+    return dynamic_fetch_mode ? m_fetch_addr : m_access.get_addr();
+  }
+  new_addr_type get_original_addr() const { return m_access.get_addr(); }
+  unsigned get_original_data_size() const { return m_data_size; }
+  void set_fetch_addr(new_addr_type addr) { m_fetch_addr = addr; }
+  new_addr_type get_fetch_addr() const { return m_fetch_addr; }
+
   unsigned get_access_size() const { return m_access.get_size(); }
   new_addr_type get_partition_addr() const { return m_partition_addr; }
   unsigned get_sub_partition_id() const { return m_raw_addr.sub_partition; }
@@ -119,7 +138,12 @@ class mem_fetch {
     return m_access.get_byte_mask();
   }
   mem_access_sector_mask_t get_access_sector_mask() const {
-    return m_access.get_sector_mask();
+    return dynamic_fetch_mode ? dynamic_fetch_sector_mask : m_access.get_sector_mask();
+    //return m_access.get_sector_mask();
+  }
+
+  void set_dynamic_fetch_sector_mask(mem_access_sector_mask_t mask) {
+    dynamic_fetch_sector_mask = mask;
   }
 
   address_type get_pc() const { return m_inst.empty() ? -1 : m_inst.pc; }
@@ -133,7 +157,10 @@ class mem_fetch {
   mem_fetch *get_original_mf() { return original_mf; }
   mem_fetch *get_original_wr_mf() { return original_wr_mf; }
 
+  void set_dynamic_fetch_mode(bool mode) { dynamic_fetch_mode = mode; }
+  bool get_dynamic_fetch_mode() const { return dynamic_fetch_mode; }
  private:
+  bool dynamic_fetch_mode = false;
   // request source information
   unsigned m_request_uid;
   unsigned m_sid;
@@ -147,6 +174,8 @@ class mem_fetch {
   // request type, address, size, mask
   mem_access_t m_access;
   unsigned m_data_size;  // how much data is being written
+  new_addr_type m_fetch_addr = 0;
+  unsigned m_fetch_size = 0;
   unsigned
       m_ctrl_size;  // how big would all this meta data be in hardware (does not
                     // necessarily match actual size of mem_fetch)
@@ -156,6 +185,8 @@ class mem_fetch {
   addrdec_t m_raw_addr;  // raw physical address (i.e., decoded DRAM
                          // chip-row-bank-column address)
   enum mf_type m_type;
+
+  mem_access_sector_mask_t dynamic_fetch_sector_mask;
 
   // statistics
   unsigned

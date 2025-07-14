@@ -789,6 +789,9 @@ typedef std::bitset<MAX_MEMORY_ACCESS_SIZE> mem_access_byte_mask_t;
 const unsigned SECTOR_CHUNCK_SIZE = 4;  // four sectors
 const unsigned SECTOR_SIZE = 32;        // sector is 32 bytes width
 typedef std::bitset<SECTOR_CHUNCK_SIZE> mem_access_sector_mask_t;
+
+uint64_t get_sector_mask_key(const mem_access_sector_mask_t& mask);
+
 #define NO_PARTIAL_WRITE (mem_access_byte_mask_t())
 
 #define MEM_ACCESS_TYPE_TUP_DEF                                         \
@@ -991,7 +994,17 @@ class inst_t {
   }
   bool valid() const { return m_decoded; }
   virtual void print_insn(FILE *fp) const {
-    fprintf(fp, " [inst @ pc=0x%04llx] ", pc);
+    // print out whether the instruction is a load or a store and
+    // print out the size of the instruction
+    // and also the type of the instruction
+    if (is_load()) {
+      fprintf(fp, " [ld @ pc=0x%04llx] ", pc);
+    } else if (is_store()) {
+      fprintf(fp, " [st @ pc=0x%04llx] ", pc);
+    } else {
+      fprintf(fp, " [inst @ pc=0x%04llx] ", pc);
+    }
+    fprintf(fp, " [size=%d] ", isize);
   }
   bool is_load() const {
     return (op == LOAD_OP || op == TENSOR_CORE_LOAD_OP ||
@@ -1001,6 +1014,8 @@ class inst_t {
     return (op == STORE_OP || op == TENSOR_CORE_STORE_OP ||
             memory_op == memory_store);
   }
+
+  address_type get_pc() const { return pc; }
 
   bool is_fp() const { return ((sp_op == FP__OP)); }  // VIJAY
   bool is_fpdiv() const { return ((sp_op == FP_DIV_OP)); }
@@ -1168,7 +1183,7 @@ class warp_inst_t : public inst_t {
     }
   }
   struct transaction_info {
-    std::bitset<4> chunks;  // bitmask: 32-byte chunks accessed
+    std::bitset<SECTOR_CHUNCK_SIZE> chunks;  // bitmask: 32-byte chunks accessed
     mem_access_byte_mask_t bytes;
     active_mask_t active;  // threads in this transaction
 
@@ -1210,10 +1225,29 @@ class warp_inst_t : public inst_t {
 
   // accessors
   virtual void print_insn(FILE *fp) const {
-    fprintf(fp, " [inst @ pc=0x%04llx] ", pc);
+    if (is_load())
+      fprintf(fp, " [ld @ pc=0x%04llx] ", pc);
+    else if (is_store())
+      fprintf(fp, " [st @ pc=0x%04llx] ", pc);
+    else
+      fprintf(fp, " [inst @ pc=0x%04llx] ", pc);
     for (int i = (int)m_config->warp_size - 1; i >= 0; i--)
       fprintf(fp, "%c", ((m_warp_active_mask[i]) ? '1' : '0'));
   }
+
+  virtual void print_pc(FILE *fp) const {
+    if (is_load())
+      fprintf(fp, " [ld @ pc=0x%04llx] ", pc);
+    else if (is_store())
+      fprintf(fp, " [st @ pc=0x%04llx] ", pc);
+    else
+      fprintf(fp, " [inst @ pc=0x%04llx] ", pc);
+    // print out the warp id and thread block id
+    fprintf(fp, " [warp_id=%u] ", m_warp_id);
+    fprintf(fp, " [tpc=%u] ", m_scheduler_id);
+    fprintf(fp, " [sid=%u] ", m_uid);
+  }
+
   bool active(unsigned thread) const { return m_warp_active_mask.test(thread); }
   unsigned active_count() const { return m_warp_active_mask.count(); }
   unsigned issued_count() const {

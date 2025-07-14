@@ -53,7 +53,7 @@ enum cache_request_status {
   RESERVATION_FAIL,
   SECTOR_MISS,
   MSHR_HIT,
-  EVICTION,
+  EVICTION, // This is just for collect eviction statistics
   NUM_CACHE_REQUEST_STATUS
 };
 
@@ -201,6 +201,7 @@ struct cache_block_t {
                           mem_access_sector_mask_t sector_mask) = 0;
   virtual void set_byte_mask(mem_fetch *mf) = 0;
   virtual void set_byte_mask(mem_access_byte_mask_t byte_mask) = 0;
+  virtual mem_access_sector_mask_t get_valid_sector_mask() = 0;
   virtual mem_access_byte_mask_t get_dirty_byte_mask() = 0;
   virtual mem_access_sector_mask_t get_dirty_sector_mask() = 0;
   virtual unsigned long long get_last_access_time() = 0;
@@ -213,6 +214,8 @@ struct cache_block_t {
                                     mem_access_sector_mask_t sector_mask) = 0;
   virtual void set_readable_on_fill(bool readable,
                                     mem_access_sector_mask_t sector_mask) = 0;
+  virtual void increment_access_count(
+      mem_access_sector_mask_t sector_mask) = 0;
   virtual void set_byte_mask_on_fill(bool m_modified) = 0;
   virtual unsigned get_modified_size() = 0;
   virtual void set_m_readable(bool readable,
@@ -224,6 +227,8 @@ struct cache_block_t {
   new_addr_type m_tag;
   new_addr_type m_block_addr;
   unsigned long long m_stream_id; // Stream ID that owns this cache line
+  // This is the sector mask of the valid sectors in the cacheline
+  mem_access_sector_mask_t m_valid_sector_mask;
 };
 
 struct line_cache_block : public cache_block_t {
@@ -297,6 +302,9 @@ struct line_cache_block : public cache_block_t {
   virtual void set_byte_mask(mem_access_byte_mask_t byte_mask) {
     m_dirty_byte_mask = m_dirty_byte_mask | byte_mask;
   }
+  virtual mem_access_sector_mask_t get_valid_sector_mask() {
+    return m_valid_sector_mask;
+  }
   virtual mem_access_byte_mask_t get_dirty_byte_mask() {
     return m_dirty_byte_mask;
   }
@@ -342,6 +350,9 @@ struct line_cache_block : public cache_block_t {
     printf("m_block_addr is %llu, status = %u\n", m_block_addr, m_status);
   }
 
+  virtual void increment_access_count(
+    mem_access_sector_mask_t sector_mask){}
+
  private:
   unsigned long long m_alloc_time;
   unsigned long long m_last_access_time;
@@ -368,6 +379,7 @@ struct sector_cache_block : public cache_block_t {
       m_set_modified_on_fill[i] = false;
       m_set_readable_on_fill[i] = false;
       m_readable[i] = true;
+      m_access_count[i] = 0;
     }
     m_line_alloc_time = 0;
     m_line_last_access_time = 0;
@@ -427,6 +439,7 @@ struct sector_cache_block : public cache_block_t {
     m_ignore_on_fill_status[sidx] = false;
     // m_set_modified_on_fill[sidx] = false;
     m_readable[sidx] = true;
+    m_access_count[sidx] = 0;
 
     // set line stats
     m_line_last_access_time = time;
@@ -450,6 +463,7 @@ struct sector_cache_block : public cache_block_t {
       m_ignore_on_fill_status[i] = false;
       m_set_modified_on_fill[i] = false;
       m_set_readable_on_fill[i] = false;
+      m_access_count[i] = 0;
     }
 
     // set line stats
@@ -522,6 +536,9 @@ struct sector_cache_block : public cache_block_t {
     if (status == INVALID) {
       reset_stream_id();  // Reset stream ID when block is invalidated
     }
+    if (status == VALID || status == MODIFIED || status == RESERVED) {
+      m_valid_sector_mask = m_valid_sector_mask | sector_mask;
+    }
   }
 
   virtual void set_byte_mask(mem_fetch *mf) {
@@ -539,6 +556,9 @@ struct sector_cache_block : public cache_block_t {
       if (m_status[i] == MODIFIED) sector_mask.set(i);
     }
     return sector_mask;
+  }
+  virtual mem_access_sector_mask_t get_valid_sector_mask() {
+    return m_valid_sector_mask;
   }
   virtual unsigned long long get_last_access_time() {
     return m_line_last_access_time;
@@ -573,6 +593,12 @@ struct sector_cache_block : public cache_block_t {
                                     mem_access_sector_mask_t sector_mask) {
     unsigned sidx = get_sector_index(sector_mask);
     m_set_readable_on_fill[sidx] = readable;
+  }
+  
+  virtual void increment_access_count(
+      mem_access_sector_mask_t sector_mask) {
+    unsigned sidx = get_sector_index(sector_mask);
+    m_access_count[sidx]++;
   }
   virtual void set_m_readable(bool readable,
                               mem_access_sector_mask_t sector_mask) {
@@ -611,6 +637,7 @@ struct sector_cache_block : public cache_block_t {
   bool m_set_readable_on_fill[SECTOR_CHUNCK_SIZE];
   bool m_set_byte_mask_on_fill;
   bool m_readable[SECTOR_CHUNCK_SIZE];
+  uint32_t m_access_count[SECTOR_CHUNCK_SIZE];
   mem_access_byte_mask_t m_dirty_byte_mask;
 
   unsigned get_sector_index(mem_access_sector_mask_t sector_mask) {
@@ -954,6 +981,16 @@ class cache_config {
   void set_fill_entire_line(bool fill) { m_fill_entire_line = fill; }
   bool is_fill_entire_line_on_clean() { return m_fill_entire_line_on_clean; }
   void set_fill_entire_line_on_clean(bool fill) { m_fill_entire_line_on_clean = fill; }
+  bool is_dynamic_fetch_mem() { return m_dynamic_fetch_mem; }
+  void set_dynamic_fetch_mem(bool dynamic) { m_dynamic_fetch_mem = dynamic; }
+  unsigned get_dynamic_fetch_size() { return m_dynamic_fetch_size; }
+  void set_dynamic_fetch_size(unsigned size) { m_dynamic_fetch_size = size; }
+  bool is_collect_sector_stats() const {
+    return collect_sector_stats;
+  }
+  void set_collect_sector_stats(bool collect) {
+    collect_sector_stats = collect;
+  }
   FuncCache get_cache_status() { return cache_status; }
   void set_allocation_policy(enum allocation_policy_t alloc) {
     m_alloc_policy = alloc;
@@ -1016,6 +1053,9 @@ class cache_config {
   bool m_is_streaming;
   bool m_fill_entire_line;
   bool m_fill_entire_line_on_clean;
+  bool m_dynamic_fetch_mem;
+  unsigned m_dynamic_fetch_size = 128;
+  bool collect_sector_stats;  // collect sector stats for sector cache
 
   enum replacement_policy_t m_replacement_policy;  // 'L' = LRU, 'F' = FIFO
   enum write_policy_t
@@ -1081,6 +1121,9 @@ class l1d_cache_config : public cache_config {
     // gpgpu_unified_cache_size is in KB while original_sz is in B
     if (m_unified_cache_size > 0) {
       unsigned original_size = m_nset * original_m_assoc * m_line_sz / 1024;
+      if (m_unified_cache_size % original_size != 0)
+        printf("unified cache size %u org size %u\n",
+        m_unified_cache_size, original_size);
       assert(m_unified_cache_size % original_size == 0);
       return m_unified_cache_size / original_size;
     } else {
@@ -1107,11 +1150,11 @@ class tag_array {
 
   enum cache_request_status probe(new_addr_type addr, unsigned &idx,
                                   mem_fetch *mf, bool is_write,
-                                  bool probe_mode = false) const;
+                                  bool probe_mode = false);
   enum cache_request_status probe(new_addr_type addr, unsigned &idx,
                                   mem_access_sector_mask_t mask, bool is_write,
                                   bool probe_mode = false,
-                                  mem_fetch *mf = NULL) const;
+                                  mem_fetch *mf = NULL);
   bool stream_reserved_exceeds_allocation(new_addr_type addr,
                                   unsigned long long streamID) const;
   enum cache_request_status access(new_addr_type addr, unsigned time,
@@ -1167,6 +1210,8 @@ class tag_array {
 
   std::string get_name() const { return m_name; }
 
+  void print_sector_mask_stats(FILE *stream);
+
  protected:
   // This constructor is intended for use only from derived classes that wish to
   // avoid unnecessary memory allocation that takes place in the
@@ -1221,6 +1266,24 @@ class tag_array {
   // Snapshot counters (for windowed statistics)
   unsigned long long m_prev_snapshot_evictions;
   unsigned long long m_prev_snapshot_evictions_no_reuse;
+
+  std::map<uint64_t, uint64_t> sector_mask_stats;
+
+  // address map to sector mask
+  std::map<address_type,uint64_t> addr_to_sector_mask;
+
+  // address map to pc
+  std::map<address_type,std::set<address_type>> addr_to_pc_set;
+
+  // pc to mask
+  std::map<address_type,std::set<uint64_t>> inst_to_mask_set;
+  // pc to inst
+  std::map<address_type,warp_inst_t> pc_to_inst_set;
+
+  void update_sector_mask_stats(
+  mem_access_sector_mask_t sector_mask, uint64_t addr,
+  warp_inst_t inst);
+
 };
 
 class mshr_table {
@@ -1568,6 +1631,11 @@ class baseline_cache : public cache_t {
   void get_sub_stats(struct cache_sub_stats &css) const {
     m_stats.get_sub_stats(css);
   }
+
+  void print_sector_mask_stats(FILE *stream) const {
+    m_tag_array->print_sector_mask_stats(stream);
+  }
+
   // Clear per-window stats for AerialVision support
   void clear_pw() { m_stats.clear_pw(); }
   // Per-window sub stats for AerialVision support

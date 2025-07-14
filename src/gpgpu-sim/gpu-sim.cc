@@ -260,10 +260,26 @@ void memory_config::reg_options(class OptionParser *opp) {
                          &m_fill_entire_line, 
                          "Fill entire cache line instead of just sectors in L1/L2 cache (default = no)",
                          "0");
-  option_parser_register(opp, "-gpgpu_fill_entire_line_on_clean", OPT_BOOL,
-                         &m_fill_entire_line_on_clean, 
-                         "Fill entire cache line on clean instead of just sectors in L1/L2 cache (default = no)",
+  option_parser_register(opp, "-gpgpu_fill_entire_line_on_clean_l1", OPT_BOOL,
+                         &m_fill_entire_line_on_cleanl1, 
+                         "Fill entire cache line on clean instead of just sectors in L1 cache (default = no)",
                          "0");                       
+  option_parser_register(opp, "-gpgpu_fill_entire_line_on_clean_l2", OPT_BOOL,
+                         &m_fill_entire_line_on_cleanl2, 
+                         "Fill entire cache line on clean instead of just sectors in L1 cache (default = no)",
+                         "0");
+  option_parser_register(opp, "-gpgpu_dynamic_fetch_mem_cache", OPT_BOOL,
+                         &m_dynamic_fetch_mem,
+                         "Enable dynamic fetch mode (default = no)",
+                         "0");
+  option_parser_register(opp, "-gpgpu_dynamic_fetch_size_cache", OPT_UINT32,
+                         &m_dynamic_fetch_size,
+                         "Dynamic fetch size (default = 128)",
+                         "128");
+  option_parser_register(opp, "-collect_sector_stats", OPT_BOOL,
+                         &collect_sector_stats, 
+                         "collect sector cache statistics (default = no)",
+                         "0");                         
   // Cache partitioning options
   option_parser_register(
       opp, "-gpgpu_cache_stream_partitioning", OPT_BOOL, &gpgpu_cache_stream_partitioning,
@@ -515,6 +531,17 @@ void shader_core_config::reg_options(class OptionParser *opp) {
   option_parser_register(
       opp, "-gpgpu_reg_bank_use_warp_id", OPT_BOOL, &gpgpu_reg_bank_use_warp_id,
       "Use warp ID in mapping registers to banks (default = off)", "0");
+
+  option_parser_register(
+      opp, "-gpgpu_dynamic_fetch_mem", OPT_BOOL,
+      &gpgpu_dynamic_fetch_mem,
+      "dynamically change size of request memory fetches (default = off)",
+      "0"
+  );
+  option_parser_register(opp, "-gpgpu_dynamic_fetch_size", OPT_INT32,
+       &gpgpu_dynamic_fetch_size,
+       "dynamic memory fetch size", "128");
+
   option_parser_register(opp, "-gpgpu_sub_core_model", OPT_BOOL,
                          &sub_core_model,
                          "Sub Core Volta/Pascal model (default = off)", "0");
@@ -1443,6 +1470,14 @@ void gpgpu_sim::deadlock_check() {
         }
         num_cores += m_shader_config->n_simt_cores_per_cluster;
       }
+      printf("\n");
+      m_cluster[i]->print_not_completed_detail(stdout);
+      printf("\n");
+      // print out l1d cache
+      for (unsigned i = 0; i < m_config.num_cluster(); i++) {
+        m_cluster[i]->print_core_detail(stdout);
+      }
+      printf("\n");
     }
     printf("\n");
     for (unsigned i = 0; i < m_memory_config->m_n_mem; i++) {
@@ -2235,7 +2270,13 @@ void gpgpu_sim::cycle() {
       } else {
         mem_fetch *mf = (mem_fetch *)icnt_pop(m_shader_config->mem2device(i));
         m_memory_sub_partition[i]->push(mf, gpu_sim_cycle + gpu_tot_sim_cycle);
-        if (mf) partiton_reqs_in_parallel_per_cycle++;
+        if (mf) {
+          // temp debug
+          printf("Push mf to m_memory_sub_partition[%d]: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d\n",
+         i, mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode());
+          mf->print(stdout, false);
+          partiton_reqs_in_parallel_per_cycle++;
+        }
       }
       m_memory_sub_partition[i]->cache_cycle(gpu_sim_cycle + gpu_tot_sim_cycle);
       if (m_config.g_power_simulation_enabled) {
@@ -2432,11 +2473,11 @@ void gpgpu_sim::perf_memcpy_to_gpu(size_t dst_start_addr, size_t count) {
     // 32
     //== 0);
 
-    for (unsigned counter = 0; counter < count; counter += 32) {
+    for (unsigned counter = 0; counter < count; counter += SECTOR_SIZE) {
       const unsigned wr_addr = dst_start_addr + counter;
       addrdec_t raw_addr;
       mem_access_sector_mask_t mask;
-      mask.set(wr_addr % 128 / 32);
+      mask.set(wr_addr % 128 / SECTOR_SIZE);
       m_memory_config->m_address_mapping.addrdec_tlx(wr_addr, &raw_addr);
       const unsigned partition_id =
           raw_addr.sub_partition /
@@ -2605,7 +2646,7 @@ void sst_gpgpu_sim::SST_cycle() {
     }
   }
 
-  if (!(gpu_sim_cycle % 100000)) {
+  if (!(gpu_sim_cycle % 1000)) {
     // deadlock detection
     if (m_config.gpu_deadlock_detect && gpu_sim_insn == last_gpu_sim_insn) {
       gpu_deadlock = true;
