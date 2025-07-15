@@ -790,6 +790,8 @@ const unsigned SECTOR_CHUNCK_SIZE = 4;  // four sectors
 const unsigned SECTOR_SIZE = 32;        // sector is 32 bytes width
 typedef std::bitset<SECTOR_CHUNCK_SIZE> mem_access_sector_mask_t;
 
+extern unsigned dynamic_fetch_size;
+
 uint64_t get_sector_mask_key(const mem_access_sector_mask_t& mask);
 
 #define NO_PARTIAL_WRITE (mem_access_byte_mask_t())
@@ -1192,12 +1194,23 @@ class warp_inst_t : public inst_t {
         if (bytes.test(i)) return true;
       return false;
     }
+    void print(FILE *fp) {
+      fprintf(fp, "trans: chunks=%s, bytes=%s, active=%s",
+      chunks.to_string().c_str(), bytes.to_string().c_str(), active.to_string().c_str());
+    }
   };
 
   void generate_mem_accesses();
   void memory_coalescing_arch(bool is_write, mem_access_type access_type);
   void memory_coalescing_arch_atomic(bool is_write,
                                      mem_access_type access_type);
+  void adapt_memory_access_dynamic_fetch_size(bool is_write,
+                                              mem_access_type access_type,
+                                              transaction_info &info,
+                                              new_addr_type& addr,
+                                              unsigned& segment_size
+                                              );
+
   void memory_coalescing_arch_reduce_and_send(bool is_write,
                                               mem_access_type access_type,
                                               const transaction_info &info,
@@ -1335,6 +1348,8 @@ class warp_inst_t : public inst_t {
   bool m_mem_accesses_created;
   std::list<mem_access_t> m_accessq;
 
+  std::set<new_addr_type> m_accessed_addrs;
+  
   unsigned m_scheduler_id;  // the scheduler that issues this inst
 
   // Jin: cdp support

@@ -227,6 +227,8 @@ uint64_t get_sector_mask_key(const mem_access_sector_mask_t& mask) {
   return mask.to_ullong(); // Converts to unsigned long long (uint64_t)
 }
 
+unsigned dynamic_fetch_size = 32;
+
 const char *mem_access_type_str(enum mem_access_type access_type){
 #define MA_TUP_BEGIN(X) static const char *access_type_str[] = {
 #define MA_TUP(X) #X
@@ -518,6 +520,7 @@ void warp_inst_t::memory_coalescing_arch(bool is_write,
       segment_size = sector_segment_size ? 32 : 128;
       break;
   }
+
   unsigned subwarp_size = m_config->warp_size / warp_parts;
 
   for (unsigned subwarp = 0; subwarp < warp_parts; subwarp++) {
@@ -585,13 +588,31 @@ void warp_inst_t::memory_coalescing_arch(bool is_write,
       }
     }
 
+    unsigned segment_size_bk = segment_size;
+    
+    /*
+    // print out subwarp_transactions
+    std::map<new_addr_type, transaction_info>::iterator t_print;
+    // print out inst pc and subwarp id
+    fprintf(stdout, "inst pc: %lx, subwarp_id: %u ", pc, subwarp);
+    for (t_print = subwarp_transactions.begin(); t_print != subwarp_transactions.end();
+         t_print++) {
+      // print out the address and transaction info
+      fprintf(stdout, "addr: %lx, ", t_print->first);
+      t_print->second.print(stdout);
+      fprintf(stdout, "\n");
+    }
+    */
+    
     // step 2: reduce each transaction size, if possible
     std::map<new_addr_type, transaction_info>::iterator t;
     for (t = subwarp_transactions.begin(); t != subwarp_transactions.end();
          t++) {
       new_addr_type addr = t->first;
-      const transaction_info &info = t->second;
-
+      transaction_info &info = t->second;
+      segment_size = segment_size_bk;
+      adapt_memory_access_dynamic_fetch_size(is_write, access_type, info, addr,
+                                            segment_size);
       memory_coalescing_arch_reduce_and_send(is_write, access_type, info, addr,
                                              segment_size);
     }
@@ -704,10 +725,69 @@ void warp_inst_t::memory_coalescing_arch_atomic(bool is_write,
   }
 }
 
+void warp_inst_t::adapt_memory_access_dynamic_fetch_size(bool is_write,
+    mem_access_type access_type,
+    transaction_info &info,
+    new_addr_type& addr,
+    unsigned& segment_size
+    ) {
+  if (is_write) {
+    return;
+  }
+  
+  new_addr_type end_addr = addr + segment_size;
+  new_addr_type addr128 = addr & ~(128 - 1);
+  new_addr_type addr64 = addr & ~(64 - 1);
+  new_addr_type addr96 = addr128 + 96;
+
+  new_addr_type new_addr_start  = addr;
+  new_addr_type new_addr_end = addr + dynamic_fetch_size;
+  if (dynamic_fetch_size == 64) {
+    if (addr > addr64) {
+      new_addr_start = addr64;
+      new_addr_end = addr64 + 64;
+    } else {
+      new_addr_start = addr128;
+      new_addr_end = addr128 + 64;
+    }
+
+    segment_size = 64;
+  } else if (dynamic_fetch_size == 128) {
+    new_addr_start = addr128;
+    new_addr_end = addr128 + 128;
+    segment_size = 128;
+  } else if (dynamic_fetch_size == 96) {
+    if (addr < addr96) {
+      new_addr_start = addr128;
+      new_addr_end = addr96;
+    } else {
+      new_addr_start = addr128 + 32;
+      new_addr_end = addr128 + 128;
+    }
+    segment_size = 96;
+  } else {
+    assert(false);
+  }
+
+  addr = new_addr_start;
+  
+  // update info.chunks according to new addr and new segment size
+  for (unsigned i = 0; i < SECTOR_CHUNCK_SIZE; i++) {
+    if (info.chunks.test(i)) {
+      continue;
+    } else {
+      new_addr_type sector_addr = addr128 + (i * SECTOR_SIZE);
+      if (sector_addr >= new_addr_start && sector_addr < new_addr_end) {
+        info.chunks.set(i);
+      }
+    }
+  }    
+}
+
 void warp_inst_t::memory_coalescing_arch_reduce_and_send(
     bool is_write, mem_access_type access_type, const transaction_info &info,
     new_addr_type addr, unsigned segment_size) {
-  assert((addr & (segment_size - 1)) == 0);
+  //assert((addr & (segment_size - 1)) == 0);
 
   const std::bitset<SECTOR_CHUNCK_SIZE> &q = info.chunks;
   assert(q.count() >= 1);
@@ -813,9 +893,31 @@ void warp_inst_t::memory_coalescing_arch_reduce_and_send(
   // size cannot be less than sector size
   assert(size >= sector_size);
 
-  m_accessq.push_back(mem_access_t(access_type, addr, size, is_write,
-                                   info.active, info.bytes, info.chunks,
-                                   m_config->gpgpu_ctx));
+  //printf("addr: %lx, size: %u, sector_size: %u, segment_size: %u, dynamic_fetch_size: %u, info.chunks: %x, is_write: %d\n",
+  //addr, size, sector_size, segment_size, dynamic_fetch_size, info.chunks.to_ulong(), is_write);
+
+  // Create separate mem_access_t for each sector that is being accessed
+  // Original code (single mem_access_t for all sectors):
+  // m_accessq.push_back(mem_access_t(access_type, addr, size, is_write,
+  //                                  info.active, info.bytes, info.chunks,
+  //                                  m_config->gpgpu_ctx));
+  new_addr_type addr_128 = addr & ~(128 - 1);
+  for (unsigned i = 0; i < SECTOR_CHUNCK_SIZE; i++) {
+    if (info.chunks.test(i)) {
+      new_addr_type sector_addr = addr_128 + (i * SECTOR_SIZE);
+      if (m_accessed_addrs.find(sector_addr) != m_accessed_addrs.end()) {
+        continue;
+      }
+      mem_access_sector_mask_t sector_mask;
+      sector_mask.set(i);
+      //printf("sector_addr/addr/addr_128: %lx, %lx, %lx sector_mask: %x, sector_size: %u info.chunks: %x\n",
+      //      sector_addr, addr, addr_128, sector_mask.to_ulong(), SECTOR_SIZE, info.chunks.to_ulong());
+      m_accessq.push_back(mem_access_t(access_type, sector_addr, SECTOR_SIZE, is_write,
+                                       info.active, info.bytes, sector_mask,
+                                       m_config->gpgpu_ctx));
+      m_accessed_addrs.insert(sector_addr);
+    }
+  }
 }
 
 void warp_inst_t::completed(unsigned long long cycle) const {

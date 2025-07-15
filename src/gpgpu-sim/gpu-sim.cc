@@ -274,8 +274,8 @@ void memory_config::reg_options(class OptionParser *opp) {
                          "0");
   option_parser_register(opp, "-gpgpu_dynamic_fetch_size_cache", OPT_UINT32,
                          &m_dynamic_fetch_size,
-                         "Dynamic fetch size (default = 128)",
-                         "128");
+                         "Dynamic fetch size (default = 32)",
+                         "32");
   option_parser_register(opp, "-collect_sector_stats", OPT_BOOL,
                          &collect_sector_stats, 
                          "collect sector cache statistics (default = no)",
@@ -2272,9 +2272,9 @@ void gpgpu_sim::cycle() {
         m_memory_sub_partition[i]->push(mf, gpu_sim_cycle + gpu_tot_sim_cycle);
         if (mf) {
           // temp debug
-          printf("Push mf to m_memory_sub_partition[%d]: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d\n",
-         i, mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode());
-          mf->print(stdout, false);
+          //printf("Push mf to m_memory_sub_partition[%d]: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d\n",
+          //i, mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode());
+          //mf->print(stdout, false);
           partiton_reqs_in_parallel_per_cycle++;
         }
       }

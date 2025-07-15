@@ -1589,9 +1589,9 @@ void baseline_cache::cycle() {
     if (!m_memport->full(mf->size(), mf->get_is_write())) {
       m_miss_queue.pop_front();
       m_memport->push(mf);
-      printf("%s push mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d\n",
-         get_name().c_str(), mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode());
-      mf->print(stdout, false);
+      //printf("%s push mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d\n",
+      //   get_name().c_str(), mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode());
+      //mf->print(stdout, false);
     }
   }
   bool data_port_busy = !m_bandwidth_management.data_port_free();
@@ -1632,27 +1632,27 @@ void baseline_cache::fill(mem_fetch *mf, unsigned time) {
   }
 
   //print out mf detailed information
-  printf("%s mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d base cache fill\n",
-         get_name().c_str(), mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode());
-  if (mf->get_original_mf() != nullptr) {
-    mf->get_original_mf()->print(stdout, false);
-  }
-  mf->print(stdout, false);
+  //printf("%s mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d base cache fill\n",
+  //       get_name().c_str(), mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode());
+  //if (mf->get_original_mf() != nullptr) {
+  //  mf->get_original_mf()->print(stdout, false);
+  //}
+  //mf->print(stdout, false);
 
   extra_mf_fields_lookup::iterator e = m_extra_mf_fields.find(mf);
-  if (m_config.m_dynamic_fetch_mem && mf->get_original_mf() != nullptr) {
-    e = m_extra_mf_fields.find(mf->get_original_mf());
-  } else {
-    e = m_extra_mf_fields.find(mf);
-  }
+  //if (m_config.m_dynamic_fetch_mem && mf->get_original_mf() != nullptr) {
+  //  e = m_extra_mf_fields.find(mf->get_original_mf());
+  //} else {
+  //  e = m_extra_mf_fields.find(mf);
+  //}
   if (e == m_extra_mf_fields.end() || !e->second.m_valid) {
     printf("error: e == m_extra_mf_fields.end() || !e->second.m_valid\n");
     assert(0);
   }
   mf->set_data_size(e->second.m_data_size);
   mf->set_addr(e->second.m_addr);
-  printf("mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d\n",
-         mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode());
+  //printf("mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d\n",
+  //       mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode());
   if (m_config.m_alloc_policy == ON_MISS)
     m_tag_array->fill(e->second.m_cache_index, time, mf);
   else if (m_config.m_alloc_policy == ON_FILL) {
@@ -1674,9 +1674,9 @@ void baseline_cache::fill(mem_fetch *mf, unsigned time) {
   }
   m_extra_mf_fields.erase(mf);
   // print out mf detailed information
-  printf("%s mf: %p, data_size/original_data_size: %d/%d, addr/original_addr: %lx/%lx, dynamic_fetch_mode=%d erase from m_extra_mf_fields\n",
-         get_name().c_str(), mf, mf->get_data_size(), mf->get_original_data_size(), mf->get_addr(), mf->get_original_addr(), mf->get_dynamic_fetch_mode());
-  mf->print(stdout, false);
+  //printf("%s mf: %p, data_size/original_data_size: %d/%d, addr/original_addr: %lx/%lx, dynamic_fetch_mode=%d erase from m_extra_mf_fields\n",
+  //       get_name().c_str(), mf, mf->get_data_size(), mf->get_original_data_size(), mf->get_addr(), mf->get_original_addr(), mf->get_dynamic_fetch_mode());
+  //mf->print(stdout, false);
   m_bandwidth_management.use_fill_port(mf);
 }
 
@@ -1773,9 +1773,9 @@ void baseline_cache::send_read_request(new_addr_type addr,
       m_tag_array->access(block_addr, time, cache_index, wb, evicted, mf);
 
     m_mshrs.add(mshr_addr, mf);
-    printf("mshr_hit && mshr_avail mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d\n",
-         mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode());
-    mf->print(stdout, false);
+    //printf("mshr_hit && mshr_avail mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d\n",
+    //     mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode());
+    //mf->print(stdout, false);
     m_stats.inc_stats(mf->get_access_type(), MSHR_HIT, mf->get_streamID());
     do_miss = true;
 
@@ -1787,6 +1787,9 @@ void baseline_cache::send_read_request(new_addr_type addr,
       m_tag_array->access(block_addr, time, cache_index, wb, evicted, mf);
 
     m_mshrs.add(mshr_addr, mf);
+    m_extra_mf_fields[mf] = extra_mf_fields(
+        mshr_addr, mf->get_addr(), cache_index, mf->get_data_size(), m_config);
+    /*
     mem_fetch *temp = nullptr;
     temp = mf->get_original_mf();
     if (temp!=nullptr) {
@@ -1805,6 +1808,7 @@ void baseline_cache::send_read_request(new_addr_type addr,
       get_name().c_str(), mf, mf->get_data_size(), mf->get_original_data_size(), mf->get_addr(), mf->get_original_addr(), mf->get_dynamic_fetch_mode(), cache_index, mshr_addr);
       mf->print(stdout, false);
     }
+    */
 
     mf->set_data_size(m_config.get_atom_sz());
     mf->set_addr(mshr_addr);
@@ -2319,7 +2323,7 @@ enum cache_request_status data_cache::rd_miss_base(
 enum cache_request_status read_only_cache::access(
     new_addr_type addr, mem_fetch *mf, unsigned time,
     std::list<cache_event> &events) {
-  assert(mf->get_data_size() <= m_config.get_atom_sz());
+  //assert(mf->get_data_size() <= m_config.get_atom_sz());
   assert(m_config.m_write_policy == READ_ONLY);
   assert(!mf->get_is_write());
   new_addr_type block_addr = m_config.block_addr(addr);
@@ -2413,7 +2417,6 @@ enum cache_request_status data_cache::process_tag_probe(
 enum cache_request_status data_cache::access(new_addr_type addr, mem_fetch *mf,
                                              unsigned time,
                                              std::list<cache_event> &events) {
-  //In dynamic fetch mode, the 
   //assert(mf->get_data_size() <= m_config.get_atom_sz());
   bool wr = mf->get_is_write();
   new_addr_type block_addr = m_config.block_addr(addr);
@@ -2467,7 +2470,7 @@ enum cache_request_status tex_cache::access(new_addr_type addr, mem_fetch *mf,
                                             std::list<cache_event> &events) {
   if (m_fragment_fifo.full() || m_request_fifo.full() || m_rob.full())
     return RESERVATION_FAIL;
-  //assert(mf->get_data_size() <= m_config.get_line_sz());
+  assert(mf->get_data_size() <= m_config.get_line_sz());
 
   // at this point, we will accept the request : access tags and immediately
   // allocate line

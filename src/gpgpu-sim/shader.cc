@@ -2081,6 +2081,10 @@ mem_stage_stall_type ldst_unit::process_memory_access_queue_l1cache(
       unsigned bank_id = m_config->m_L1D_config.set_bank(mf->get_addr());
       assert(bank_id < m_config->m_L1D_config.l1_banks);
 
+      // This was intended to support multi sector request for each mf
+      // for example, we could support load 96 bytes, if the instruction always fetch 96 bytes
+      // However, it failed, since current cache only support each mf only load one sector
+      /*
       if (m_config->gpgpu_dynamic_fetch_mem
         && mf->get_dynamic_fetch_mode() == false) {
         new_addr_type orgAddr = mf->get_addr();
@@ -2127,6 +2131,7 @@ mem_stage_stall_type ldst_unit::process_memory_access_queue_l1cache(
               mf->get_access_sector_mask().to_ulong());
         }     
       }
+      */
 
       if ((l1_latency_queue[bank_id][m_config->m_L1D_config.l1_latency - 1]) ==
           NULL) {
@@ -4090,9 +4095,9 @@ bool shader_core_ctx::ldst_unit_response_buffer_full() const {
 
 void shader_core_ctx::accept_ldst_unit_response(mem_fetch *mf) {
   m_ldst_unit->fill(mf);
-  printf("accept_ldst_unit_response mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d\n",
-         mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode());
-  mf->print(stdout, true);
+  //printf("accept_ldst_unit_response mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d\n",
+  //       mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode());
+  //mf->print(stdout, true);
 }
 
 void shader_core_ctx::store_ack(class mem_fetch *mf) {

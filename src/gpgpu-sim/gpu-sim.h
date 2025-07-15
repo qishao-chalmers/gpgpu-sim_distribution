@@ -221,7 +221,7 @@ class memory_config {
     m_fill_entire_line_on_cleanl2 = false;
     collect_sector_stats = false;
     m_dynamic_fetch_mem = false;
-    m_dynamic_fetch_size = 128;
+    m_dynamic_fetch_size = 32;
     gpgpu_ctx = ctx;
   }
   void init() {
@@ -458,6 +458,10 @@ class gpgpu_sim_config : public power_config,
     m_shader_config.m_L1D_config.set_collect_sector_stats(m_memory_config.collect_sector_stats);
     m_shader_config.m_L1D_config.set_dynamic_fetch_mem(m_memory_config.m_dynamic_fetch_mem);
     m_shader_config.m_L1D_config.set_dynamic_fetch_size(m_memory_config.m_dynamic_fetch_size);
+
+    // set global dynamic fetch size
+    dynamic_fetch_size = m_memory_config.m_dynamic_fetch_size;
+
     init_clock_domains();
     power_config::init();
     Trace::init();

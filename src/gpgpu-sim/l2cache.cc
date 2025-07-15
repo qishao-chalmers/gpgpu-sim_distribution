@@ -570,9 +570,9 @@ void memory_sub_partition::cache_cycle(unsigned cycle) {
   if (!m_L2_dram_queue->full() && !m_icnt_L2_queue->empty()) {
     mem_fetch *mf = m_icnt_L2_queue->top();
     // temp debug
-    printf("%d l2 cache mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d\n",
-         m_id, mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode());
-    mf->print(stdout, false);
+    //printf("%d l2 cache mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d\n",
+    //     m_id, mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode());
+    //mf->print(stdout, false);
     if (!m_config->m_L2_config.disabled() &&
         ((m_config->m_L2_texure_only && mf->istexture()) ||
          (!m_config->m_L2_texure_only))) {
@@ -669,20 +669,20 @@ void memory_sub_partition::cache_cycle(unsigned cycle) {
     mf->set_status(IN_PARTITION_ICNT_TO_L2_QUEUE,
                    m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);
     // temp debug
-    printf("m_icnt_L2_queue : %d push mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d\n",
-         m_id, mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode());
-    mf->print(stdout, false);
+    //printf("m_icnt_L2_queue : %d push mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d\n",
+    //     m_id, mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode());
+    //mf->print(stdout, false);
   }
 
   // temp debug
-  if (!m_rop.empty() && (cycle >= m_rop.front().ready_cycle)) {
+  /*if (!m_rop.empty() && (cycle >= m_rop.front().ready_cycle)) {
     if (m_icnt_L2_queue->full()) {
       mem_fetch *mf = m_rop.front().req;
       printf("ROP delay queue m_icnt_L2_queue full, mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d\n",
          m_id, mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode());
       mf->print(stdout, false);
     }
-  }
+  }*/
 }
 
 bool memory_sub_partition::full() const { return m_icnt_L2_queue->full(); }
@@ -885,6 +885,7 @@ void memory_sub_partition::push(mem_fetch *m_req, unsigned long long cycle) {
       reqs = breakdown_request_to_sector_requests(m_req);
       // temp debug
       // m_req is breaked into the following reqs
+      /*
       for (unsigned i = 0; i < reqs.size(); ++i) {
         printf("m_req is breaked into the following reqs: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d m_req: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d\n",
         reqs[i], reqs[i]->get_data_size(), reqs[i]->get_addr(), reqs[i]->get_dynamic_fetch_mode(),
@@ -892,6 +893,7 @@ void memory_sub_partition::push(mem_fetch *m_req, unsigned long long cycle) {
         reqs[i]->print(stdout, false);
         m_req->print(stdout, false);
       }
+      */
     } else {
       reqs.push_back(m_req);
     }
