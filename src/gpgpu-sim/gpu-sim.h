@@ -707,6 +707,13 @@ class gpgpu_sim : public gpgpu_t {
    */
   simt_core_cluster *getSIMTCluster();
 
+  //! Get ldst_unit by ID
+  /*!
+   * Returns the ldst_unit for the specified ldst_unit_id
+   * Used for accessing L1 cache from other cores
+   */
+  ldst_unit *get_ldst_unit(unsigned ldst_unit_id);
+
   void hit_watchpoint(unsigned watchpoint_num, ptx_thread_info *thd,
                       const ptx_instruction *pI);
 

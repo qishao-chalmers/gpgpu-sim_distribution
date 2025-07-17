@@ -2078,60 +2078,11 @@ mem_stage_stall_type ldst_unit::process_memory_access_queue_l1cache(
           m_mf_allocator->alloc(inst, inst.accessq_back(),
                                 m_core->get_gpu()->gpu_sim_cycle +
                                     m_core->get_gpu()->gpu_tot_sim_cycle);
+      //printf("process_memory_access_queue_l1cache mf: %p,addr: %lx, core id %d\n",
+      //       mf, mf->get_addr(), m_sid);
+      //mf->print(stdout, true);
       unsigned bank_id = m_config->m_L1D_config.set_bank(mf->get_addr());
       assert(bank_id < m_config->m_L1D_config.l1_banks);
-
-      // This was intended to support multi sector request for each mf
-      // for example, we could support load 96 bytes, if the instruction always fetch 96 bytes
-      // However, it failed, since current cache only support each mf only load one sector
-      /*
-      if (m_config->gpgpu_dynamic_fetch_mem
-        && mf->get_dynamic_fetch_mode() == false) {
-        new_addr_type orgAddr = mf->get_addr();
-        new_addr_type newAddr = mf->get_addr();
-        uint32_t org_mf_size = mf->get_data_size();
-        uint32_t mf_size = org_mf_size;
-        mf->set_dynamic_fetch_mode(true);
-
-        // we align the fetch size to the dynamic fetch size
-        // and guarantee that the address and the dynamic fetch size does not
-        // cross the 128B cache line size boundary
-
-        if (m_config->gpgpu_dynamic_fetch_size == 128) {
-          newAddr = newAddr & ~0x7f;
-          mf_size = 128;
-          assert(SECTOR_SIZE == 32);
-          mf->set_dynamic_fetch_sector_mask(0xf);
-        } else if (m_config->gpgpu_dynamic_fetch_size == 64) {
-          if (org_mf_size < m_config->gpgpu_dynamic_fetch_size) {
-            new_addr_type addr128 = newAddr & ~0x7f;
-            if (orgAddr + m_config->gpgpu_dynamic_fetch_size > addr128 + 128) {
-              newAddr = addr128 + 128 - m_config->gpgpu_dynamic_fetch_size;
-            }
-            mf_size = 64;
-            assert(SECTOR_SIZE == 32);
-            // according to the newAddr, set the sector mask for 64 bytes
-            new_addr_type sector_start_id = (newAddr & 0x7f) >>5;
-            mem_access_sector_mask_t mask;
-            mask.set(sector_start_id);
-            mask.set(sector_start_id + 1);
-            mf->set_dynamic_fetch_sector_mask(mask);
-          }
-        }
-
-        mf->set_fetch_data_size(mf_size);
-        mf->set_fetch_addr(newAddr);
-
-        if (orgAddr != mf->get_addr() || 
-            org_mf_size != mf_size) {
-            printf(
-              "%s Dynamic fetch mode enabled for mf %p, orgAddr=%#lx, newAddr=%#lx, "
-              "org_size/fetch_size=%u/%u sector_mask=%x\n",
-              cache->get_name().c_str(), mf, orgAddr, newAddr, org_mf_size, mf_size,
-              mf->get_access_sector_mask().to_ulong());
-        }     
-      }
-      */
 
       if ((l1_latency_queue[bank_id][m_config->m_L1D_config.l1_latency - 1]) ==
           NULL) {
@@ -2695,9 +2646,27 @@ ldst_unit::ldst_unit(mem_fetch_interface *icnt,
   if (!m_config->m_L1D_config.disabled()) {
     char L1D_name[STRSIZE];
     snprintf(L1D_name, STRSIZE, "L1D_%03d", m_sid);
-    m_L1D = new l1_cache(L1D_name, m_config->m_L1D_config, m_sid,
-                         get_shader_normal_cache_id(), m_icnt, m_mf_allocator,
-                         IN_L1D_MISS_QUEUE, core->get_gpu(), L1_GPU_CACHE);
+    if (m_config->m_L1D_config.shareL1()) {
+      // now four ldst units share the same L1D cache
+      if (m_sid % m_config->m_L1D_config.m_num_sm_shareL1 == 0) {
+        m_L1D = new l1_cache(L1D_name, m_config->m_L1D_config, m_sid,
+        get_shader_normal_cache_id(), m_icnt, m_mf_allocator,
+        IN_L1D_MISS_QUEUE, core->get_gpu(), L1_GPU_CACHE);
+        printf("L1D cache created for ldst unit %d %p\n", m_sid, m_L1D);
+      } else {
+        // get the l1d cache from the ldst unit with
+        unsigned ldst_unit_id = m_sid & (~(m_config->m_L1D_config.m_num_sm_shareL1-1));
+        m_L1D = core->get_gpu()->get_ldst_unit(ldst_unit_id)->m_L1D;
+        printf("L1D cache shared for ldst unit %d %p\n", m_sid, m_L1D);
+      }
+      
+  
+    } else {
+      m_L1D = new l1_cache(L1D_name, m_config->m_L1D_config, m_sid,
+        get_shader_normal_cache_id(), m_icnt, m_mf_allocator,
+        IN_L1D_MISS_QUEUE, core->get_gpu(), L1_GPU_CACHE);
+    }
+
 
     l1_latency_queue.resize(m_config->m_L1D_config.l1_banks);
     assert(m_config->m_L1D_config.l1_latency > 0);
@@ -2843,9 +2812,12 @@ void ldst_unit::writeback() {
         }
         break;
       case 4:
-        if (m_L1D && m_L1D->access_ready()) {
+        if (m_L1D && m_L1D->access_ready() && m_L1D->next_access_match_id(m_sid)) {
           mem_fetch *mf = m_L1D->next_access();
           m_next_wb = mf->get_inst();
+          // print mf addr, mf core id and ldstunit id
+          //printf("ldst_unit::writeback mf: %p, addr: %lx, mf sid %d, ldstunit id %d\n",
+          //       mf, mf->get_addr(), mf->get_sid(), m_sid);
           delete mf;
           serviced_client = next_client;
         }
@@ -3802,10 +3774,10 @@ std::list<opndcoll_rfu_t::op_t> opndcoll_rfu_t::arbiter_t::allocate_reads() {
         // Grant!
         _inmatch[input] = output;
         _outmatch[output] = input;
-        // printf("Register File: granting bank %d to OC %d, schedid %d, warpid
-        // %d, Regid %d\n", input, output, (m_queue[input].front()).get_sid(),
-        // (m_queue[input].front()).get_wid(),
-        // (m_queue[input].front()).get_reg());
+        //printf("Register File: granting bank %d to OC %d, schedid %d, warpid
+        //%d, Regid %d\n", input, output, (m_queue[input].front()).get_sid(),
+        //m_queue[input].front()).get_wid(),
+        //(m_queue[input].front()).get_reg());
       }
 
       output = (output + 1) % _outputs;
@@ -4095,8 +4067,8 @@ bool shader_core_ctx::ldst_unit_response_buffer_full() const {
 
 void shader_core_ctx::accept_ldst_unit_response(mem_fetch *mf) {
   m_ldst_unit->fill(mf);
-  //printf("accept_ldst_unit_response mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d\n",
-  //       mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode());
+  //printf("accept_ldst_unit_response mf: %p, data_size: %d, addr: %lx, dynamic_fetch_mode=%d, core id %d\n",
+  //       mf, mf->get_data_size(), mf->get_addr(), mf->get_dynamic_fetch_mode(), m_sid);
   //mf->print(stdout, true);
 }
 

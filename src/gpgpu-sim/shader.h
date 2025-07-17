@@ -2672,6 +2672,14 @@ class simt_core_cluster {
   float get_current_occupancy(unsigned long long &active,
                               unsigned long long &total) const;
   virtual void create_shader_core_ctx() = 0;
+  
+  // Get shader core by ID within this cluster
+  shader_core_ctx *get_core(unsigned core_id) const {
+    if (core_id < m_config->n_simt_cores_per_cluster) {
+      return m_core[core_id];
+    }
+    return NULL;
+  }
 
  protected:
   unsigned m_cluster_id;

@@ -696,6 +696,8 @@ class cache_config {
   cache_config() {
     m_valid = false;
     m_disabled = false;
+    m_shareL1 = false;
+    m_num_sm_shareL1 = 0;
     m_config_string = NULL;  // set by option parser
     m_config_stringPrefL1 = NULL;
     m_config_stringPrefShared = NULL;
@@ -913,6 +915,10 @@ class cache_config {
     }
   }
   bool disabled() const { return m_disabled; }
+  bool shareL1() const { return m_shareL1; }
+  void set_shareL1(bool share) { m_shareL1 = share; }
+  unsigned num_sm_shareL1() const { return m_num_sm_shareL1; }
+  void set_num_sm_shareL1(unsigned num) { m_num_sm_shareL1 = num; }
   unsigned get_line_sz() const {
     assert(m_valid);
     return m_line_sz;
@@ -1000,6 +1006,8 @@ class cache_config {
   char *m_config_stringPrefShared;
   FuncCache cache_status;
   unsigned m_wr_percent;
+  bool m_shareL1;
+  unsigned m_num_sm_shareL1;
   write_allocate_policy_t get_write_allocate_policy() {
     return m_write_alloc_policy;
   }
@@ -1042,6 +1050,7 @@ class cache_config {
 
   bool m_valid;
   bool m_disabled;
+
   unsigned m_line_sz;
   unsigned m_line_sz_log2;
   unsigned m_nset;
@@ -1312,6 +1321,7 @@ class mshr_table {
   bool access_ready() const { return !m_current_response.empty(); }
   /// Returns next ready access
   mem_fetch *next_access();
+  mem_fetch *peek_next_access();
   void display(FILE *fp) const;
   // Returns true if there is a pending read after write
   bool is_read_after_write_pending(new_addr_type block_addr);
@@ -1613,6 +1623,15 @@ class baseline_cache : public cache_t {
   bool access_ready() const { return m_mshrs.access_ready(); }
   /// Pop next ready access (does not include accesses that "HIT")
   mem_fetch *next_access() { return m_mshrs.next_access(); }
+  /// Peek next ready access (does not include accesses that "HIT")
+  mem_fetch *peek_next_access() { return m_mshrs.peek_next_access(); }
+  bool next_access_match_id (unsigned sid) {
+    mem_fetch *mf = peek_next_access();
+    if (mf) {
+      return mf->get_sid() == sid;
+    }
+    return false;
+  }
   // flash invalidate all entries in cache
   void flush() { m_tag_array->flush(); }
   void invalidate() { m_tag_array->invalidate(); }

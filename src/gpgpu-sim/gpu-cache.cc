@@ -961,6 +961,15 @@ mem_fetch *mshr_table::next_access() {
   return result;
 }
 
+/// Returns next ready access
+mem_fetch *mshr_table::peek_next_access() {
+  assert(access_ready());
+  new_addr_type block_addr = m_current_response.front();
+  assert(!m_data[block_addr].m_list.empty());
+  mem_fetch *result = m_data[block_addr].m_list.front();
+  return result;
+}
+
 void mshr_table::display(FILE *fp) const {
   fprintf(fp, "MSHR contents\n");
   for (table::const_iterator e = m_data.begin(); e != m_data.end(); ++e) {

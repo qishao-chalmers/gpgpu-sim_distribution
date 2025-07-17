@@ -425,6 +425,12 @@ void shader_core_config::reg_options(class OptionParser *opp) {
                          "global memory access skip L1D cache (implements "
                          "-Xptxas -dlcm=cg, default=no skip)",
                          "0");
+  option_parser_register(opp, "-gpgpu_share_L1D", OPT_BOOL, &m_L1D_config.m_shareL1,
+                         "share L1D cache between shader cores (default = off)",
+                         "0");
+  option_parser_register(opp, "-gpgpu_num_sm_shareL1", OPT_UINT32, &m_L1D_config.m_num_sm_shareL1,
+                         "number of shader cores sharing L1D cache (default = 4)",
+                         "4");
 
   option_parser_register(opp, "-gpgpu_perfect_mem", OPT_BOOL,
                          &gpgpu_perfect_mem,
@@ -2672,4 +2678,24 @@ unsigned long long gpgpu_sim::get_first_stream_id() const {
     }
   }
   return 0;  // Default stream ID
+}
+
+ldst_unit *gpgpu_sim::get_ldst_unit(unsigned ldst_unit_id) {
+  // Map ldst_unit_id to shader core ID
+  // Each shader core has one ldst_unit, so ldst_unit_id corresponds to shader core ID
+  if (ldst_unit_id >= m_shader_config->num_shader()) {
+    // Invalid ldst_unit_id
+    return NULL;
+  }
+  
+  // Get the cluster and core within the cluster
+  unsigned cluster_id = m_shader_config->sid_to_cluster(ldst_unit_id);
+  unsigned core_id = m_shader_config->sid_to_cid(ldst_unit_id);
+  
+  // Access the ldst_unit from the shader core using the public method
+  shader_core_ctx *core = m_cluster[cluster_id]->get_core(core_id);
+  if (core == NULL) {
+    return NULL;
+  }
+  return core->m_ldst_unit;
 }

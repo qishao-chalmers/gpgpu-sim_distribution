@@ -734,6 +734,9 @@ void warp_inst_t::adapt_memory_access_dynamic_fetch_size(bool is_write,
   if (is_write) {
     return;
   }
+  if (dynamic_fetch_size == 32) {
+    return;
+  }
   
   new_addr_type end_addr = addr + segment_size;
   new_addr_type addr128 = addr & ~(128 - 1);
