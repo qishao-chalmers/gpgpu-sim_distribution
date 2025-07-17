@@ -959,8 +959,7 @@ kernel_info_t::kernel_info_t(dim3 gridDim, dim3 blockDim,
   
   // Initialize core range fields for stream-based partitioning
   m_has_core_range = false;
-  m_start_core = 0;
-  m_end_core = 0;
+  core_range.clear();
 }
 
 /*A snapshot of the texture mappings needs to be stored in the kernel's info as
@@ -997,8 +996,7 @@ kernel_info_t::kernel_info_t(
   
   // Initialize core range fields for stream-based partitioning
   m_has_core_range = false;
-  m_start_core = 0;
-  m_end_core = 0;
+  core_range.clear();
 }
 
 kernel_info_t::~kernel_info_t() {

@@ -32,6 +32,8 @@
 #ifndef ABSTRACT_HARDWARE_MODEL_INCLUDED
 #define ABSTRACT_HARDWARE_MODEL_INCLUDED
 
+#include <sstream>
+
 // Forward declarations
 class gpgpu_sim;
 class kernel_info_t;
@@ -299,22 +301,33 @@ class kernel_info_t {
   // Core range management for stream-based partitioning
   void set_core_range(unsigned start_core, unsigned end_core) {
     m_has_core_range = true;
-    m_start_core = start_core;
-    m_end_core = end_core;
+    for (unsigned core = start_core; core <= end_core; core++) {
+      core_range.insert(core);
+    }
+  }
+
+  void set_core_range(std::set<unsigned> core_range) {
+    m_has_core_range = true;
+    this->core_range = core_range;
   }
   
   bool has_core_range() const { return m_has_core_range; }
-  unsigned get_start_core() const { return m_start_core; }
-  unsigned get_end_core() const { return m_end_core; }
 
   bool is_in_core_range(unsigned coreId) {
-    return ((coreId >= m_start_core && coreId <= m_end_core) ||
+    return (core_range.find(coreId) != core_range.end() ||
            !m_has_core_range);
   }
 
   std::string print_core_range() const {
     if (m_has_core_range) {
-      return std::to_string(m_start_core) + "-" + std::to_string(m_end_core);
+      std::stringstream ss;
+      for (auto it = core_range.begin(); it != core_range.end(); ++it) {
+        ss << *it;
+        if (std::next(it) != core_range.end()) {
+          ss << ",";
+        }
+      }
+      return ss.str();
     } else {
       return "no core range";
     }
@@ -402,8 +415,9 @@ class kernel_info_t {
 
   // Core range management for stream-based partitioning
   bool m_has_core_range;
-  unsigned m_start_core;
-  unsigned m_end_core;
+  std::set<unsigned> core_range;
+  //unsigned m_start_core;
+  //unsigned m_end_core;
 };
 
 class core_config {

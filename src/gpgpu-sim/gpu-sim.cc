@@ -745,6 +745,8 @@ void gpgpu_sim_config::reg_options(option_parser_t opp) {
       opp, "-gpgpu_runtime_stat", OPT_CSTR, &gpgpu_runtime_stat,
       "display runtime statistics such as dram utilization {<freq>:<flag>}",
       "10000:0");
+  option_parser_register(opp, "-gpgpu_stream_intlv_core", OPT_BOOL, &gpgpu_stream_intlv_core,
+  "interleave the cores of the two streams (default = disabled)", "0");
   option_parser_register(opp, "-liveness_message_freq", OPT_INT64,
                          &liveness_message_freq,
                          "Minimum number of seconds between simulation "
@@ -2015,7 +2017,7 @@ void shader_core_ctx::issue_block2core(kernel_info_t &kernel) {
   /*
   std::cout << "issue_block2core: " << kernel.get_name() <<
   " core_id: " << m_sid << " stream_id: " << kernel.get_streamID() <<
-  " start_core: " << kernel.get_start_core() << " end_core: " << kernel.get_end_core() <<
+  " kernel.print_core_range(): " << kernel.print_core_range() <<
   " at cycle: " << m_gpu->gpu_sim_cycle << std::endl;
   */
 
@@ -2558,8 +2560,15 @@ void gpgpu_sim::set_kernel_core_range(kernel_info_t *kernel, unsigned start_core
   
   std::cout << "CONFIRMED: Kernel " << kernel->get_name() 
             << " core range set - has_range:" << kernel->has_core_range()
-            << ", start:" << kernel->get_start_core() 
-            << ", end:" << kernel->get_end_core() << std::endl;
+            << ", core_range:" << kernel->print_core_range() << std::endl;
+}
+
+void gpgpu_sim::set_kernel_core_range(kernel_info_t *kernel, std::set<unsigned> core_range) {
+  // Store core range in kernel metadata
+  kernel->set_core_range(core_range);
+  std::cout << "CONFIRMED: Kernel " << kernel->get_name() 
+            << " core range set - has_range:" << kernel->has_core_range()
+            << ", core_range:" << kernel->print_core_range() << std::endl;
 }
 
 void sst_gpgpu_sim::SST_gpgpusim_numcores_equal_check(unsigned sst_numcores) {

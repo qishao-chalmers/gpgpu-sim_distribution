@@ -490,6 +490,8 @@ class gpgpu_sim_config : public power_config,
 
   bool get_stream_partitioning() const { return m_shader_config.gpgpu_stream_partitioning; }
 
+  bool get_stream_intlv_core() const { return gpgpu_stream_intlv_core; }
+
   /**
    * @brief Check if we are in SST mode
    *
@@ -561,6 +563,7 @@ class gpgpu_sim_config : public power_config,
   unsigned int gpgpu_compute_capability_major;
   unsigned int gpgpu_compute_capability_minor;
   unsigned long long liveness_message_freq;
+  bool gpgpu_stream_intlv_core;
 
   friend class gpgpu_sim;
   friend class sst_gpgpu_sim;
@@ -626,6 +629,7 @@ class gpgpu_sim : public gpgpu_t {
   bool can_start_kernel();
   kernel_info_t *next_kernel();
   void set_kernel_core_range(kernel_info_t *kernel, unsigned start_core, unsigned end_core);
+  void set_kernel_core_range(kernel_info_t *kernel, std::set<unsigned> core_range);
 
   unsigned finished_kernel();
   void set_kernel_done(kernel_info_t *kernel);
