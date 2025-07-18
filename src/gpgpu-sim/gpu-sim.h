@@ -626,6 +626,7 @@ class gpgpu_sim : public gpgpu_t {
   void set_prop(struct cudaDeviceProp *prop);
 
   void launch(kernel_info_t *kinfo);
+  void restart_stream(unsigned long long stream_id);
   bool can_start_kernel();
   kernel_info_t *next_kernel();
   void set_kernel_core_range(kernel_info_t *kernel, unsigned start_core, unsigned end_core);

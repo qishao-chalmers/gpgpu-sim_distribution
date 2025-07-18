@@ -911,6 +911,15 @@ void gpgpu_sim::launch(kernel_info_t *kinfo) {
   assert(n < m_running_kernels.size());
 }
 
+void gpgpu_sim::restart_stream(unsigned long long stream_id) {
+  std::cout << "Restarting stream " << stream_id << std::endl;
+  //if (stream_id == 0) {
+  //  m_running_kernels_stream1.clear();
+  //} else {
+  //  m_running_kernels_stream2.clear();
+  //}
+}
+
 bool gpgpu_sim::can_start_kernel() {
   for (unsigned n = 0; n < m_running_kernels.size(); n++) {
     if ((NULL == m_running_kernels[n]) || m_running_kernels[n]->done())
@@ -1038,7 +1047,9 @@ kernel_info_t *gpgpu_sim::select_kernel(unsigned core_id, std::vector<kernel_inf
   }
 
   for (unsigned n = 0; n < m_running_kernels_stream.size(); n++) {
+
     unsigned idx = (n + m_last_issued_kernel_stream + 1) % m_running_kernels_stream.size();
+
     if (kernel_more_cta_left(m_running_kernels_stream[idx]) &&
         !m_running_kernels_stream[idx]->m_kernel_TB_latency) {
       if (!m_running_kernels_stream[idx]->is_in_core_range(core_id)) {
@@ -1062,7 +1073,7 @@ kernel_info_t *gpgpu_sim::select_kernel(unsigned core_id, std::vector<kernel_inf
       m_executed_kernel_uids.push_back(launch_uid);
       m_executed_kernel_names.push_back(m_running_kernels_stream[idx]->name());
 
-      printf("select_kernel switch core_id %u, stream %u kernel %s\n",
+      printf("select_kernel switch core_id %u, kernelId %u kernel %s\n",
       core_id, m_last_issued_kernel_stream, m_running_kernels_stream[idx]->name().c_str());
 
       return m_running_kernels_stream[idx];

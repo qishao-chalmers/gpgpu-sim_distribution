@@ -2292,6 +2292,8 @@ bool ldst_unit::memory_cycle(warp_inst_t &inst,
     else if (m_core->get_config()->gmem_skip_L1D_stream1 && (inst.get_streamID() == 1)
       && (CACHE_L1 != inst.cache_op))
       bypassL1D = true;
+    // only support at most 2 streams
+    assert(inst.get_streamID() < 2);
   }
   if (bypassL1D) {
     // bypass L1 cache
