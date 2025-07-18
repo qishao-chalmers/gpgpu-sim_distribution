@@ -464,6 +464,8 @@ class core_config {
 
   unsigned gpgpu_max_insn_issue_per_warp;
   bool gmem_skip_L1D;  // on = global memory access always skip the L1 cache
+  bool gmem_skip_L1D_stream0; // on = global memory access always skip the L1 cache for stream 0
+  bool gmem_skip_L1D_stream1; // on = global memory access always skip the L1 cache for stream 1
 
   bool adaptive_cache_config;
 };

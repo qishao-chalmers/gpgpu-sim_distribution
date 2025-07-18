@@ -2284,6 +2284,14 @@ bool ldst_unit::memory_cycle(warp_inst_t &inst,
     // skip L1 cache if the option is enabled
     if (m_core->get_config()->gmem_skip_L1D && (CACHE_L1 != inst.cache_op))
       bypassL1D = true;
+    // if inst is from stream 1, skip L1 cache if the option is enabled
+    else if (m_core->get_config()->gmem_skip_L1D_stream0 && (inst.get_streamID() == 0)
+      && (CACHE_L1 != inst.cache_op))
+      bypassL1D = true;
+    // if inst is from stream 0, skip L1 cache if the option is enabled
+    else if (m_core->get_config()->gmem_skip_L1D_stream1 && (inst.get_streamID() == 1)
+      && (CACHE_L1 != inst.cache_op))
+      bypassL1D = true;
   }
   if (bypassL1D) {
     // bypass L1 cache
@@ -2907,6 +2915,13 @@ void ldst_unit::cycle() {
                    mf->get_access_type() ==
                        GLOBAL_ACC_W) {  // global memory access
           if (m_core->get_config()->gmem_skip_L1D) bypassL1D = true;
+          else if (m_core->get_config()->gmem_skip_L1D_stream0 && (mf->get_streamID() == 0)
+          && (CACHE_L1 != mf->get_inst().cache_op))
+          bypassL1D = true;
+          // if inst is from stream 0, skip L1 cache if the option is enabled
+          else if (m_core->get_config()->gmem_skip_L1D_stream1 && (mf->get_streamID() == 1)
+          && (CACHE_L1 != mf->get_inst().cache_op))
+          bypassL1D = true;
         }
         if (bypassL1D) {
           if (m_next_global == NULL) {

@@ -425,6 +425,12 @@ void shader_core_config::reg_options(class OptionParser *opp) {
                          "global memory access skip L1D cache (implements "
                          "-Xptxas -dlcm=cg, default=no skip)",
                          "0");
+  option_parser_register(opp, "-gpgpu_gmem_skip_L1D_stream0", OPT_BOOL, &gmem_skip_L1D_stream0,
+                         "global memory access skip L1D cache for stream 0 (default = no skip)",
+                         "0");
+  option_parser_register(opp, "-gpgpu_gmem_skip_L1D_stream1", OPT_BOOL, &gmem_skip_L1D_stream1,
+                         "global memory access skip L1D cache for stream 1 (default = no skip)",
+                         "0");
   option_parser_register(opp, "-gpgpu_share_L1D", OPT_BOOL, &m_L1D_config.m_shareL1,
                          "share L1D cache between shader cores (default = off)",
                          "0");
@@ -987,7 +993,17 @@ kernel_info_t *gpgpu_sim::select_kernel() {
 kernel_info_t *gpgpu_sim::select_kernel(unsigned core_id) {
   unsigned total_cores = m_config.num_shader();
   // choose which stream current core belongs to
-  bool isStreamOne = core_id < total_cores/2 || m_running_kernels_stream2.empty();
+  
+  bool isStreamOne = false;
+  
+  if (m_running_kernels_stream2.empty()) {
+    isStreamOne = m_running_kernels_stream2.empty();
+  } else if (m_config.get_stream_intlv_core()) {
+    if (core_id % 2 == 0)
+      isStreamOne = true;
+  } else {
+    isStreamOne = core_id < total_cores/2;
+  }
 
   if (isStreamOne ) {
     return select_kernel(core_id, m_running_kernels_stream1, m_last_issued_kernel_stream1);
