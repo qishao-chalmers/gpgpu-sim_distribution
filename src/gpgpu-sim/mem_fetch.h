@@ -159,6 +159,10 @@ class mem_fetch {
 
   void set_dynamic_fetch_mode(bool mode) { dynamic_fetch_mode = mode; }
   bool get_dynamic_fetch_mode() const { return dynamic_fetch_mode; }
+
+  void set_is_prefetch(bool is_prefetch) { this->is_prefetch = is_prefetch; }
+  bool get_is_prefetch() const { return is_prefetch; }
+
  private:
   bool dynamic_fetch_mode = false;
   // request source information
@@ -166,6 +170,8 @@ class mem_fetch {
   unsigned m_sid;
   unsigned m_tpc;
   unsigned m_wid;
+
+  bool is_prefetch = false;
 
   // where is this request now?
   enum mem_fetch_status m_status;

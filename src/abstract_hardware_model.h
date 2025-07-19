@@ -807,6 +807,8 @@ const unsigned SECTOR_SIZE = 32;        // sector is 32 bytes width
 typedef std::bitset<SECTOR_CHUNCK_SIZE> mem_access_sector_mask_t;
 
 extern unsigned dynamic_fetch_size;
+extern bool dynamic_fetch_mem;
+extern unsigned inst_id;
 
 uint64_t get_sector_mask_key(const mem_access_sector_mask_t& mask);
 
@@ -875,11 +877,27 @@ class mem_access_t {
     m_write = wr;
   }
 
+  mem_access_t(mem_access_type type, new_addr_type address, unsigned size,
+    bool wr, bool prefetch, const active_mask_t &active_mask,
+    const mem_access_byte_mask_t &byte_mask,
+    const mem_access_sector_mask_t &sector_mask, gpgpu_context *ctx)
+    : m_prefetch(prefetch),
+      m_warp_mask(active_mask),
+      m_byte_mask(byte_mask),
+      m_sector_mask(sector_mask) {
+    init(ctx);
+    m_type = type;
+    m_addr = address;
+    m_req_size = size;
+    m_write = wr;
+  }
+
   new_addr_type get_addr() const { return m_addr; }
   void set_addr(new_addr_type addr) { m_addr = addr; }
   unsigned get_size() const { return m_req_size; }
   const active_mask_t &get_warp_mask() const { return m_warp_mask; }
   bool is_write() const { return m_write; }
+  bool is_prefetch() const { return m_prefetch; }
   enum mem_access_type get_type() const { return m_type; }
   mem_access_byte_mask_t get_byte_mask() const { return m_byte_mask; }
   mem_access_sector_mask_t get_sector_mask() const { return m_sector_mask; }
@@ -929,6 +947,7 @@ class mem_access_t {
   unsigned m_uid;
   new_addr_type m_addr;  // request address
   bool m_write;
+  bool m_prefetch = false;
   unsigned m_req_size;  // bytes
   mem_access_type m_type;
   active_mask_t m_warp_mask;
@@ -1133,6 +1152,7 @@ class warp_inst_t : public inst_t {
     m_is_depbar = false;
 
     m_depbar_group_no = 0;
+    m_inst_id = inst_id++;
   }
   warp_inst_t(const core_config *config) {
     m_uid = 0;
@@ -1154,6 +1174,7 @@ class warp_inst_t : public inst_t {
     m_is_depbar = false;
 
     m_depbar_group_no = 0;
+    m_inst_id = inst_id++;
   }
   virtual ~warp_inst_t() {}
 
@@ -1202,6 +1223,7 @@ class warp_inst_t : public inst_t {
   }
   struct transaction_info {
     std::bitset<SECTOR_CHUNCK_SIZE> chunks;  // bitmask: 32-byte chunks accessed
+    std::bitset<SECTOR_CHUNCK_SIZE> prefetch_chunks;  // bitmask: 32-byte chunks accessed
     mem_access_byte_mask_t bytes;
     active_mask_t active;  // threads in this transaction
 
@@ -1228,6 +1250,12 @@ class warp_inst_t : public inst_t {
                                               );
 
   void memory_coalescing_arch_reduce_and_send(bool is_write,
+                                              mem_access_type access_type,
+                                              const transaction_info &info,
+                                              new_addr_type addr,
+                                              unsigned segment_size);
+  void memory_coalescing_arch_reduce_and_send_dynamic_fetch(
+                                              bool is_write,
                                               mem_access_type access_type,
                                               const transaction_info &info,
                                               new_addr_type addr,
@@ -1378,6 +1406,7 @@ class warp_inst_t : public inst_t {
   bool m_is_depbar;
 
   unsigned int m_depbar_group_no;
+  unsigned int m_inst_id;
 };
 
 void move_warp(warp_inst_t *&dst, warp_inst_t *&src);

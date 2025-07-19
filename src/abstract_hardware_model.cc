@@ -228,6 +228,8 @@ uint64_t get_sector_mask_key(const mem_access_sector_mask_t& mask) {
 }
 
 unsigned dynamic_fetch_size = 32;
+bool dynamic_fetch_mem = false;
+unsigned inst_id = 0;
 
 const char *mem_access_type_str(enum mem_access_type access_type){
 #define MA_TUP_BEGIN(X) static const char *access_type_str[] = {
@@ -611,10 +613,16 @@ void warp_inst_t::memory_coalescing_arch(bool is_write,
       new_addr_type addr = t->first;
       transaction_info &info = t->second;
       segment_size = segment_size_bk;
-      adapt_memory_access_dynamic_fetch_size(is_write, access_type, info, addr,
+
+      if (dynamic_fetch_mem) {
+        adapt_memory_access_dynamic_fetch_size(is_write, access_type, info, addr,
                                             segment_size);
-      memory_coalescing_arch_reduce_and_send(is_write, access_type, info, addr,
+        memory_coalescing_arch_reduce_and_send_dynamic_fetch(is_write, access_type, info, addr,
                                              segment_size);
+      } else {
+        memory_coalescing_arch_reduce_and_send(is_write, access_type, info, addr,
+                                             segment_size);
+      }
     }
   }
 }
@@ -705,6 +713,7 @@ void warp_inst_t::memory_coalescing_arch_atomic(bool is_write,
         info->bytes.set(idx + i);
       }
     }
+    //printf("pc: %#x subwarp: %u segment_size: %u atomic\n", pc, subwarp, segment_size);
 
     // step 2: reduce each transaction size, if possible
     std::map<new_addr_type, std::list<transaction_info> >::iterator t_list;
@@ -745,8 +754,12 @@ void warp_inst_t::adapt_memory_access_dynamic_fetch_size(bool is_write,
 
   new_addr_type new_addr_start  = addr;
   new_addr_type new_addr_end = addr + dynamic_fetch_size;
+
+  unsigned org_fetch_size = segment_size;
+  unsigned new_fetch_size = segment_size;
+  
   if (dynamic_fetch_size == 64) {
-    if (addr > addr64) {
+    if (addr >= addr64) {
       new_addr_start = addr64;
       new_addr_end = addr64 + 64;
     } else {
@@ -754,11 +767,11 @@ void warp_inst_t::adapt_memory_access_dynamic_fetch_size(bool is_write,
       new_addr_end = addr128 + 64;
     }
 
-    segment_size = 64;
+    new_fetch_size= 64;
   } else if (dynamic_fetch_size == 128) {
     new_addr_start = addr128;
     new_addr_end = addr128 + 128;
-    segment_size = 128;
+    new_fetch_size= 128;
   } else if (dynamic_fetch_size == 96) {
     if (addr < addr96) {
       new_addr_start = addr128;
@@ -767,7 +780,13 @@ void warp_inst_t::adapt_memory_access_dynamic_fetch_size(bool is_write,
       new_addr_start = addr128 + 32;
       new_addr_end = addr128 + 128;
     }
-    segment_size = 96;
+    new_fetch_size= 96;
+  } else if (dynamic_fetch_size == 32) {
+    // in sector cache, it is always 32 bytes
+    new_addr_start = addr;
+    new_addr_end = addr + 32;
+    new_fetch_size = 32;
+    assert(segment_size == 32);
   } else {
     assert(false);
   }
@@ -781,13 +800,76 @@ void warp_inst_t::adapt_memory_access_dynamic_fetch_size(bool is_write,
     } else {
       new_addr_type sector_addr = addr128 + (i * SECTOR_SIZE);
       if (sector_addr >= new_addr_start && sector_addr < new_addr_end) {
-        info.chunks.set(i);
+        info.prefetch_chunks.set(i);
       }
     }
-  }    
+  }
+
+  //printf("pc: %#x addr: %lx, segment_size: %u, new_addr_start: %lx, new_addr_end: %lx, new_fetch_size, dynamic_fetch_size: %u info.chunks: %x info.prefetch_chunks: %x\n",
+    //pc, addr, segment_size, new_addr_start, new_addr_end, new_fetch_size, dynamic_fetch_size, info.chunks.to_ulong(), info.prefetch_chunks.to_ulong());
+
+  segment_size = new_fetch_size;
+
+  addr = new_addr_start;
 }
 
 void warp_inst_t::memory_coalescing_arch_reduce_and_send(
+  bool is_write, mem_access_type access_type, const transaction_info &info,
+  new_addr_type addr, unsigned segment_size) {
+assert((addr & (segment_size - 1)) == 0);
+
+const std::bitset<4> &q = info.chunks;
+assert(q.count() >= 1);
+std::bitset<2> h;  // halves (used to check if 64 byte segment can be
+                   // compressed into a single 32 byte segment)
+
+unsigned size = segment_size;
+if (segment_size == 128) {
+  bool lower_half_used = q[0] || q[1];
+  bool upper_half_used = q[2] || q[3];
+  if (lower_half_used && !upper_half_used) {
+    // only lower 64 bytes used
+    size = 64;
+    if (q[0]) h.set(0);
+    if (q[1]) h.set(1);
+  } else if ((!lower_half_used) && upper_half_used) {
+    // only upper 64 bytes used
+    addr = addr + 64;
+    size = 64;
+    if (q[2]) h.set(0);
+    if (q[3]) h.set(1);
+  } else {
+    assert(lower_half_used && upper_half_used);
+  }
+} else if (segment_size == 64) {
+  // need to set halves
+  if ((addr % 128) == 0) {
+    if (q[0]) h.set(0);
+    if (q[1]) h.set(1);
+  } else {
+    assert((addr % 128) == 64);
+    if (q[2]) h.set(0);
+    if (q[3]) h.set(1);
+  }
+}
+if (size == 64) {
+  bool lower_half_used = h[0];
+  bool upper_half_used = h[1];
+  if (lower_half_used && !upper_half_used) {
+    size = 32;
+  } else if ((!lower_half_used) && upper_half_used) {
+    addr = addr + 32;
+    size = 32;
+  } else {
+    assert(lower_half_used && upper_half_used);
+  }
+}
+m_accessq.push_back(mem_access_t(access_type, addr, size, is_write,
+                                 info.active, info.bytes, info.chunks,
+                                 m_config->gpgpu_ctx));
+}
+
+void warp_inst_t::memory_coalescing_arch_reduce_and_send_dynamic_fetch(
     bool is_write, mem_access_type access_type, const transaction_info &info,
     new_addr_type addr, unsigned segment_size) {
   //assert((addr & (segment_size - 1)) == 0);
@@ -911,11 +993,29 @@ void warp_inst_t::memory_coalescing_arch_reduce_and_send(
       if (m_accessed_addrs.find(sector_addr) != m_accessed_addrs.end()) {
         continue;
       }
+      // for info.chunks not enabled, it is prefetch
       mem_access_sector_mask_t sector_mask;
       sector_mask.set(i);
-      //printf("sector_addr/addr/addr_128: %lx, %lx, %lx sector_mask: %x, sector_size: %u info.chunks: %x\n",
-      //      sector_addr, addr, addr_128, sector_mask.to_ulong(), SECTOR_SIZE, info.chunks.to_ulong());
-      m_accessq.push_back(mem_access_t(access_type, sector_addr, SECTOR_SIZE, is_write,
+      //printf("warp id: %d m_scheduler_id: %d m_inst_id: %d pc: %#x sector_addr/addr/addr_128: %lx, %lx, %lx sector_mask: %x, sector_size: %u info.chunks: %x isWrite: %d\n",
+      //m_warp_id, m_scheduler_id, m_inst_id, pc, sector_addr, addr, addr_128, sector_mask.to_ulong(), SECTOR_SIZE, info.chunks.to_ulong(), is_write);
+      m_accessq.push_back(mem_access_t(access_type, sector_addr, SECTOR_SIZE, is_write, false,
+                                       info.active, info.bytes, sector_mask,
+                                       m_config->gpgpu_ctx));
+      m_accessed_addrs.insert(sector_addr);
+    }
+  }
+
+  for (unsigned i = 0; i < SECTOR_CHUNCK_SIZE; i++) {
+    if (info.prefetch_chunks.test(i)) {
+      new_addr_type sector_addr = addr_128 + (i * SECTOR_SIZE);
+      if (m_accessed_addrs.find(sector_addr) != m_accessed_addrs.end()) {
+        continue;
+      }
+      mem_access_sector_mask_t sector_mask;
+      sector_mask.set(i);
+      //printf("warp id: %d m_scheduler_id: %d m_inst_id: %d sector_addr/addr/addr_128: %lx, %lx, %lx sector_mask: %x, sector_size: %u info.chunks: %x isWrite: %d\n",
+      //  m_warp_id, m_scheduler_id, m_inst_id, sector_addr, addr, addr_128, sector_mask.to_ulong(), SECTOR_SIZE, info.chunks.to_ulong(), is_write);
+      m_accessq.push_back(mem_access_t(access_type, sector_addr, SECTOR_SIZE, is_write, true,
                                        info.active, info.bytes, sector_mask,
                                        m_config->gpgpu_ctx));
       m_accessed_addrs.insert(sector_addr);

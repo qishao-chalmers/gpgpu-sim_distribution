@@ -39,6 +39,7 @@
 #include <stdlib.h>
 #include <algorithm>
 #include <bitset>
+#include <cstdint>
 #include <deque>
 #include <list>
 #include <map>
@@ -1437,6 +1438,7 @@ class ldst_unit : public pipelined_simd_unit {
       enum cache_request_status status);
   mem_stage_stall_type process_memory_access_queue(cache_t *cache,
                                                    warp_inst_t &inst);
+  void eraseUselessPf(warp_inst_t &inst);
   mem_stage_stall_type process_memory_access_queue_l1cache(l1_cache *cache,
                                                            warp_inst_t &inst);
   gpgpu_sim *m_gpu;
@@ -2054,13 +2056,43 @@ class shader_core_mem_fetch_allocator : public mem_fetch_allocator {
         access, &inst_copy, inst.get_streamID(),
         access.is_write() ? WRITE_PACKET_SIZE : READ_PACKET_SIZE,
         inst.warp_id(), m_core_id, m_cluster_id, m_memory_config, cycle);
+    //printf("alloc inst pc: %lx addr: %lx\n", inst.get_pc(), access.get_addr());
     return mf;
+  }
+  mem_fetch *alloc(const warp_inst_t &inst, const mem_access_t &access,
+                   unsigned long long cycle){
+    if (pc != inst.get_pc()) {
+      // new pc comes in, reset the prefetch map
+      pc = inst.get_pc();
+      m_prefetch_map.clear();
+    }
+
+    if (access.is_prefetch()) {
+      m_prefetch_map.insert(access.get_addr());
+    }
+    warp_inst_t inst_copy = inst;
+    mem_fetch *mf = new mem_fetch(
+        access, &inst_copy, inst.get_streamID(),
+        access.is_write() ? WRITE_PACKET_SIZE : READ_PACKET_SIZE,
+        inst.warp_id(), m_core_id, m_cluster_id, m_memory_config, cycle);
+    //printf("alloc inst pc: %lx addr: %lx\n", inst.get_pc(), access.get_addr());
+    return mf;
+  }
+
+  bool is_pf_hit_earlier_pf (new_addr_type addr) const {
+    if (m_prefetch_map.find(addr) != m_prefetch_map.end()) {
+      return true;
+    }
+    return false;
   }
 
  private:
   unsigned m_core_id;
   unsigned m_cluster_id;
   const memory_config *m_memory_config;
+
+  new_addr_type pc = 0;
+  std::set<new_addr_type> m_prefetch_map;
 };
 
 class shader_core_ctx : public core_t {

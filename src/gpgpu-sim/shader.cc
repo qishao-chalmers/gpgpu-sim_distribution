@@ -1929,6 +1929,10 @@ void shader_core_ctx::warp_inst_complete(const warp_inst_t &inst) {
   m_stats->m_num_sim_winsn[m_sid]++;
   m_gpu->gpu_sim_insn += inst.active_count();
   inst.completed(m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle);
+
+  // temp debug
+  //printf("[warp_inst_complete] uid=%u core=%u warp=%u pc=%#x @ time=%llu \n",
+    //inst.get_uid(), m_sid, inst.warp_id(), inst.pc,  m_gpu->gpu_tot_sim_cycle +  m_gpu->gpu_sim_cycle);
 }
 
 void shader_core_ctx::writeback() {
@@ -2062,7 +2066,35 @@ mem_stage_stall_type ldst_unit::process_memory_access_queue(cache_t *cache,
       events);
   return process_cache_access(cache, mf->get_addr(), inst, events, mf, status);
 }
+void ldst_unit::eraseUselessPf(warp_inst_t &inst) {
+  if (inst.accessq_empty()) return;
+  
+  while (!inst.accessq_empty()) {
+    mem_access_t access = inst.accessq_back();
+    if (access.is_prefetch()) {
+      if (m_mf_allocator->is_pf_hit_earlier_pf(access.get_addr())) {
+        unsigned warp_id = inst.warp_id();
+        unsigned n_accesses = inst.accessq_count();
+        for (unsigned r = 0; r < MAX_OUTPUT_VALUES; r++) {
+          unsigned reg_id = inst.out[r];
+          if (reg_id > 0) {
+            m_pending_writes[warp_id][reg_id]--;
+          }
+        }
+        if (inst.m_is_ldgsts) {
+          m_pending_ldgsts[warp_id][inst.pc][inst.get_addr(0)]--;
+        }
 
+        inst.accessq_pop_back();
+        // Release credits for the useless prefetch instruction
+      } else {
+        break;
+      }
+    } else {
+      break;
+    }
+  }
+}
 mem_stage_stall_type ldst_unit::process_memory_access_queue_l1cache(
     l1_cache *cache, warp_inst_t &inst) {
   mem_stage_stall_type result = NO_RC_FAIL;
@@ -3184,6 +3216,9 @@ void gpgpu_sim::shader_print_cache_stats(FILE *fout) const {
             total_css.pending_hits);
     fprintf(fout, "\tL1D_total_cache_reservation_fails = %llu\n",
             total_css.res_fails);
+    // print out eviction stats
+    fprintf(fout, "\tL1D_total_cache_evictions = %llu\n", total_css.evictions);
+    fprintf(fout, "\tL1D_total_cache_evictions_no_reuse = %llu\n", total_css.evictions_no_reuse);
     total_css.print_port_stats(fout, "\tL1D_cache");
   }
 

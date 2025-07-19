@@ -76,6 +76,9 @@ mem_fetch::mem_fetch(const mem_access_t &access, const warp_inst_t *inst,
     m_raw_addr.chip = m_original_mf->get_tlx_addr().chip;
     m_raw_addr.sub_partition = m_original_mf->get_tlx_addr().sub_partition;
   }
+  if (m_access.is_prefetch()) {
+    is_prefetch = true;
+  }
 
   //printf("mem_fetch::mem_fetch: uid=%u, sid%02u:w%02u, address=0x%llx, size=%u\n",
   //       m_request_uid, m_sid, m_wid, get_addr(), m_data_size);

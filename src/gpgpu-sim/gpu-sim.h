@@ -461,6 +461,7 @@ class gpgpu_sim_config : public power_config,
 
     // set global dynamic fetch size
     dynamic_fetch_size = m_memory_config.m_dynamic_fetch_size;
+    dynamic_fetch_mem = m_memory_config.m_dynamic_fetch_mem;
 
     init_clock_domains();
     power_config::init();
