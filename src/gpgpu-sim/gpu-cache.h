@@ -139,6 +139,7 @@ struct cache_block_t {
     m_tag = 0;
     m_block_addr = 0;
     m_stream_id = (unsigned long long) -1; // Default stream ID
+    m_sid = (unsigned) -1; // Default core id
   }
 
   virtual void allocate(new_addr_type tag, new_addr_type block_addr,
@@ -171,6 +172,10 @@ struct cache_block_t {
     m_stream_id = stream_id; // Set the stream ID for this cache line
   }
 
+  void set_sid(unsigned sid) {
+    m_sid = sid;
+  }
+
   void set_stream_id(mem_fetch* mf, unsigned long long time) {
     unsigned long long stream_id = mf->get_streamID();
     /*
@@ -188,6 +193,17 @@ struct cache_block_t {
     }
     */
     m_stream_id = stream_id; // Set the stream ID for this cache line
+  }
+
+  void set_sid(mem_fetch* mf, unsigned long long time) {
+    if (m_sid == (unsigned) -1) {
+      unsigned sid = mf->get_sid();
+      m_sid = sid;
+    }
+  }
+
+  unsigned get_sid() const {
+    return m_sid;
   }
 
   virtual bool is_invalid_line() = 0;
@@ -227,6 +243,7 @@ struct cache_block_t {
   new_addr_type m_tag;
   new_addr_type m_block_addr;
   unsigned long long m_stream_id; // Stream ID that owns this cache line
+  unsigned m_sid; // core id
   // This is the sector mask of the valid sectors in the cacheline
   mem_access_sector_mask_t m_valid_sector_mask;
 };
@@ -1151,17 +1168,40 @@ class l2_cache_config : public cache_config {
   linear_to_raw_address_translation *m_address_mapping;
 };
 
+struct extra_cache_stats {
+  unsigned long long m_total_eviction = 0;
+  unsigned long long m_total_eviction_no_reuse = 0;
+  unsigned long long m_total_hit_count = 0;
+  unsigned long long m_total_probe_count = 0;
+  unsigned long long m_hit_other_sid = 0;
+  unsigned long long m_all_evictions = 0;
+
+  extra_cache_stats operator+(const extra_cache_stats &other){
+    extra_cache_stats result;
+    result.m_total_eviction = m_total_eviction + other.m_total_eviction;
+    result.m_total_eviction_no_reuse = m_total_eviction_no_reuse + other.m_total_eviction_no_reuse;
+    result.m_total_hit_count = m_total_hit_count + other.m_total_hit_count;
+    result.m_total_probe_count = m_total_probe_count + other.m_total_probe_count;
+    result.m_hit_other_sid = m_hit_other_sid + other.m_hit_other_sid;
+    result.m_all_evictions = m_all_evictions + other.m_all_evictions;
+    return result;
+  }
+};
+
 class tag_array {
  public:
   // Use this constructor
   tag_array(const char *name, cache_config &config, int core_id, int type_id);
   ~tag_array();
 
+  void update_sid_to_addr_set(unsigned sid, new_addr_type addr);
+
   enum cache_request_status probe(new_addr_type addr, unsigned &idx,
                                   mem_fetch *mf, bool is_write,
                                   bool probe_mode = false);
   enum cache_request_status probe(new_addr_type addr, unsigned &idx,
                                   mem_access_sector_mask_t mask, bool is_write,
+                                  unsigned sid,
                                   bool probe_mode = false,
                                   mem_fetch *mf = NULL);
   bool stream_reserved_exceeds_allocation(new_addr_type addr,
@@ -1176,7 +1216,7 @@ class tag_array {
   void fill(unsigned idx, unsigned time, mem_fetch *mf);
   void fill(new_addr_type addr, unsigned time, mem_access_sector_mask_t mask,
             mem_access_byte_mask_t byte_mask, bool is_write,
-            unsigned long long streamID = 0);
+            unsigned long long streamID = 0, unsigned sid = 0);
 
   unsigned size() const { return m_config.get_num_lines(); }
   cache_block_t *get_block(unsigned idx) { return m_lines[idx]; }
@@ -1218,6 +1258,14 @@ class tag_array {
   void set_gpu(gpgpu_sim *gpu_) { gpu = gpu_; }
 
   std::string get_name() const { return m_name; }
+
+  extra_cache_stats get_extra_stats() const { return m_extra_stats; }
+  void clear_extra_stats() {
+    m_extra_stats.m_total_hit_count = 0;
+    m_extra_stats.m_total_probe_count = 0;
+    m_extra_stats.m_hit_other_sid = 0;
+    m_extra_stats.m_all_evictions = 0;
+  }
 
   void print_sector_mask_stats(FILE *stream);
 
@@ -1269,9 +1317,13 @@ class tag_array {
 
   gpgpu_sim *gpu;
 
-  // Eviction statistics
+  // Dirty Eviction statistics
   unsigned long long m_evictions;            // total number of cache line evictions
   unsigned long long m_evictions_no_reuse;   // evictions where the line was never re-used after being filled
+  // Dirty & Clean Eviction statistics
+  unsigned long long m_all_evictions;
+  unsigned long long m_hit_other_sid;
+  unsigned long long m_total_probe_count;
   // Snapshot counters (for windowed statistics)
   unsigned long long m_prev_snapshot_evictions;
   unsigned long long m_prev_snapshot_evictions_no_reuse;
@@ -1293,6 +1345,9 @@ class tag_array {
   mem_access_sector_mask_t sector_mask, uint64_t addr,
   warp_inst_t inst);
 
+  std::map<unsigned, std::set<address_type>> m_sid_to_addr_set;
+
+  extra_cache_stats m_extra_stats;
 };
 
 class mshr_table {
@@ -1369,6 +1424,12 @@ struct cache_sub_stats {
   // eviction stats
   unsigned long long evictions;
   unsigned long long evictions_no_reuse;
+  unsigned long long all_evictions;
+
+  // hit other sid stats
+  unsigned long long hit_other_sid;
+  unsigned long long total_probe_count;
+  unsigned long long total_hit_count;
 
   unsigned long long port_available_cycles;
   unsigned long long data_port_busy_cycles;
@@ -1382,6 +1443,10 @@ struct cache_sub_stats {
     res_fails = 0;
     evictions = 0;
     evictions_no_reuse = 0;
+    all_evictions = 0;
+    hit_other_sid = 0;
+    total_probe_count = 0;
+    total_hit_count = 0;
     port_available_cycles = 0;
     data_port_busy_cycles = 0;
     fill_port_busy_cycles = 0;
@@ -1396,6 +1461,10 @@ struct cache_sub_stats {
     res_fails += css.res_fails;
     evictions += css.evictions;
     evictions_no_reuse += css.evictions_no_reuse;
+    all_evictions += css.all_evictions;
+    hit_other_sid += css.hit_other_sid;
+    total_probe_count += css.total_probe_count;
+    total_hit_count += css.total_hit_count;
     port_available_cycles += css.port_available_cycles;
     data_port_busy_cycles += css.data_port_busy_cycles;
     fill_port_busy_cycles += css.fill_port_busy_cycles;
@@ -1413,6 +1482,10 @@ struct cache_sub_stats {
     ret.res_fails = res_fails + cs.res_fails;
     ret.evictions = evictions + cs.evictions;
     ret.evictions_no_reuse = evictions_no_reuse + cs.evictions_no_reuse;
+    ret.all_evictions = all_evictions + cs.all_evictions;
+    ret.hit_other_sid = hit_other_sid + cs.hit_other_sid;
+    ret.total_probe_count = total_probe_count + cs.total_probe_count;
+    ret.total_hit_count = total_hit_count + cs.total_hit_count;
     ret.port_available_cycles =
         port_available_cycles + cs.port_available_cycles;
     ret.data_port_busy_cycles =
@@ -1895,6 +1968,9 @@ class data_cache : public baseline_cache {
                                            std::list<cache_event> &events);
   bool stream_reserved_exceeds_allocation(new_addr_type addr,
                                           unsigned long long streamID) const;
+
+  extra_cache_stats get_extra_stats() const { return m_tag_array->get_extra_stats(); }
+  void clear_extra_stats() { m_tag_array->clear_extra_stats(); }
 
  protected:
   data_cache(const char *name, cache_config &config, int core_id, int type_id,

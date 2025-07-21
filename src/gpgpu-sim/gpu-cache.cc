@@ -233,10 +233,6 @@ void tag_array::init(int core_id, int type_id) {
   is_used = false;
   m_dirty = 0;
 
-  // Eviction statistics
-  m_evictions = 0;
-  m_evictions_no_reuse = 0;
-
   // Snapshot counters
   m_prev_snapshot_evictions = 0;
   m_prev_snapshot_evictions_no_reuse = 0;
@@ -264,7 +260,7 @@ enum cache_request_status tag_array::probe(new_addr_type addr, unsigned &idx,
                                            mem_fetch *mf, bool is_write,
                                            bool probe_mode){
   mem_access_sector_mask_t mask = mf->get_access_sector_mask();
-  return probe(addr, idx, mask, is_write, probe_mode, mf);
+  return probe(addr, idx, mask, is_write, mf->get_sid(), probe_mode, mf);
 }
 
 bool tag_array::stream_reserved_exceeds_allocation(new_addr_type addr, unsigned long long streamID) const {
@@ -349,10 +345,40 @@ void tag_array::print_sector_mask_stats(FILE *stream){
   pc_to_inst_set.clear();
 }
 
+void tag_array::update_sid_to_addr_set(unsigned sid, new_addr_type addr) {
+  // align to 128 bytes
+  addr = addr & (~(128-1));
+  auto it = m_sid_to_addr_set.find(sid);
+  if (it != m_sid_to_addr_set.end() && it->second.find(addr) != it->second.end()) {
+    it->second.insert(addr);
+  } else {
+    m_sid_to_addr_set[sid] = std::set<new_addr_type>{addr};
+  }
+
+  if (sid == 0) {
+    // check hit in sid 1
+    auto it = m_sid_to_addr_set.find(1);
+    if (it != m_sid_to_addr_set.end() && it->second.find(addr) != it->second.end()) {
+      m_extra_stats.m_hit_other_sid++;
+      //printf("hit in sid 1\n");
+    }
+  } else if (sid == 1) {
+    // check hit in sid 0
+    auto it = m_sid_to_addr_set.find(0);
+    if (it != m_sid_to_addr_set.end() && it->second.find(addr) != it->second.end()) {
+      m_extra_stats.m_hit_other_sid++;
+      //printf("hit in sid 0\n");
+    }
+  }
+}
+
 enum cache_request_status tag_array::probe(new_addr_type addr, unsigned &idx,
                                            mem_access_sector_mask_t mask,
-                                           bool is_write, bool probe_mode,
+                                           bool is_write,
+                                           unsigned sid,
+                                           bool probe_mode,
                                            mem_fetch *mf){
+  //update_sid_to_addr_set(sid, addr);
   // assert( m_config.m_write_policy == READ_ONLY );
   unsigned set_index = m_config.set_index(addr);
   new_addr_type tag = m_config.tag(addr);
@@ -361,6 +387,9 @@ enum cache_request_status tag_array::probe(new_addr_type addr, unsigned &idx,
   unsigned valid_line = (unsigned)-1;
   unsigned long long valid_timestamp = (unsigned)-1;
   unsigned long long streamID = mf ? mf->get_streamID() : 0;
+
+  // count total probe count
+  m_extra_stats.m_total_probe_count++;
   
   bool all_reserved = true;
   // check for hit or pending hit
@@ -368,6 +397,11 @@ enum cache_request_status tag_array::probe(new_addr_type addr, unsigned &idx,
     unsigned index = set_index * m_config.m_assoc + way;
     cache_block_t *line = m_lines[index];
     if (line->m_tag == tag && line->m_stream_id == streamID) {
+      if (line->get_sid() != sid) {
+        m_extra_stats.m_hit_other_sid++;
+      }
+      m_extra_stats.m_total_hit_count++;
+      
       if (line->get_status(mask) == RESERVED) {
         idx = index;
         line->increment_access_count(mask);
@@ -544,6 +578,9 @@ enum cache_request_status tag_array::probe(new_addr_type addr, unsigned &idx,
         idx = invalid_line;
       } else if (valid_line != (unsigned)-1) {
         idx = valid_line;
+        // this line will be evicted, so reset the sid
+        m_lines[idx]->set_sid((unsigned) -1);
+        m_extra_stats.m_all_evictions++;
       } else
         abort();  // if an unreserved block exists, it is either invalid or
                   // replaceable
@@ -568,7 +605,7 @@ enum cache_request_status tag_array::access(new_addr_type addr, unsigned time,
   m_access++;
   is_used = true;
   shader_cache_access_log(m_core_id, m_type_id, 0);  // log accesses to cache
-  enum cache_request_status status = probe(addr, idx, mf, mf->is_write());
+  enum cache_request_status status = probe(addr, idx, mf, mf->is_write(), mf->get_sid());
   switch (status) {
     case HIT_RESERVED:
       m_pending_hit++;
@@ -611,6 +648,7 @@ enum cache_request_status tag_array::access(new_addr_type addr, unsigned time,
         if (mf) {
           //m_lines[idx]->m_stream_id = mf->get_streamID();
           m_lines[idx]->set_stream_id(mf->get_streamID(),time);
+          m_lines[idx]->set_sid(mf,time);
         }
       }
       break;
@@ -628,6 +666,7 @@ enum cache_request_status tag_array::access(new_addr_type addr, unsigned time,
           //m_lines[idx]->m_stream_id = mf->get_streamID();
           //m_lines[idx]->set_stream_id(mf->get_streamID(),time);
           m_lines[idx]->set_stream_id(mf,time);
+          m_lines[idx]->set_sid(mf,time);
         }
         if (before && !m_lines[idx]->is_modified_line()) {
           m_dirty--;
@@ -651,16 +690,16 @@ enum cache_request_status tag_array::access(new_addr_type addr, unsigned time,
 void tag_array::fill(new_addr_type addr, unsigned time, mem_fetch *mf,
                      bool is_write) {
   fill(addr, time, mf->get_access_sector_mask(), mf->get_access_byte_mask(),
-       is_write, mf->get_streamID());
+       is_write, mf->get_streamID(), mf->get_sid());
 }
 
 void tag_array::fill(new_addr_type addr, unsigned time,
                      mem_access_sector_mask_t mask,
                      mem_access_byte_mask_t byte_mask, bool is_write,
-                    unsigned long long m_stream_id) {
+                    unsigned long long m_stream_id, unsigned m_sid) {
   // assert( m_config.m_alloc_policy == ON_FILL );
   unsigned idx;
-  enum cache_request_status status = probe(addr, idx, mask, is_write);
+  enum cache_request_status status = probe(addr, idx, mask, is_write, m_sid);
 
   if (status == RESERVATION_FAIL) {
     return;
@@ -717,6 +756,7 @@ void tag_array::fill(unsigned index, unsigned time, mem_fetch *mf) {
   }
   //m_lines[index]->m_stream_id = mf->get_streamID();
   m_lines[index]->set_stream_id(mf->get_streamID(),time);
+  m_lines[index]->set_sid(mf,time);
 }
 
 // TODO: we need write back the flushed data to the upper level
@@ -2338,7 +2378,7 @@ enum cache_request_status read_only_cache::access(
   new_addr_type block_addr = m_config.block_addr(addr);
   unsigned cache_index = (unsigned)-1;
   enum cache_request_status status =
-      m_tag_array->probe(block_addr, cache_index, mf, mf->is_write());
+      m_tag_array->probe(block_addr, cache_index, mf, mf->is_write(), mf->get_sid());
   enum cache_request_status cache_status = RESERVATION_FAIL;
 
   if (status == HIT) {

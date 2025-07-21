@@ -1398,6 +1398,10 @@ class ldst_unit : public pipelined_simd_unit {
   void print(FILE *fout) const;
   void print_cache_stats(FILE *fp, unsigned &dl1_accesses,
                          unsigned &dl1_misses);
+
+  extra_cache_stats get_extra_stats() const;
+  void clear_extra_stats();
+  
   void get_cache_stats(unsigned &read_accesses, unsigned &write_accesses,
                        unsigned &read_misses, unsigned &write_misses,
                        unsigned cache_type);
@@ -2171,6 +2175,9 @@ class shader_core_ctx : public core_t {
   void print_cache_stats(FILE *fp, unsigned &dl1_accesses,
                          unsigned &dl1_misses);
 
+  extra_cache_stats get_extra_stats() const;
+  void clear_extra_stats();
+
   void get_cache_stats(cache_stats &cs);
   void get_L1I_sub_stats(struct cache_sub_stats &css) const;
   void get_L1D_sub_stats(struct cache_sub_stats &css) const;
@@ -2699,6 +2706,8 @@ class simt_core_cluster {
   void get_L1C_sub_stats(struct cache_sub_stats &css) const;
   void get_L1T_sub_stats(struct cache_sub_stats &css) const;
   void print_sector_mask_stats(FILE *stream) const;
+
+  void clear_extra_stats();
 
   void get_icnt_stats(long &n_simt_to_mem, long &n_mem_to_simt) const;
   float get_current_occupancy(unsigned long long &active,

@@ -69,6 +69,8 @@
 #include "stats.h"
 #include "visualizer.h"
 
+extern unsigned stream_num;
+
 #ifdef GPGPUSIM_POWER_MODEL
 #include "power_interface.h"
 #else
@@ -1780,8 +1782,11 @@ void gpgpu_sim::gpu_print_stat(unsigned long long streamID) {
   // performance counter that are not local to one shader
   m_memory_stats->memlatstat_print(m_memory_config->m_n_mem,
                                    m_memory_config->nbk);
-  for (unsigned i = 0; i < m_memory_config->m_n_mem; i++)
-    m_memory_partition_unit[i]->print(stdout);
+  for (unsigned i = 0; i < m_memory_config->m_n_mem; i++) {
+    if (stream_num == 1) {
+      m_memory_partition_unit[i]->print(stdout);
+    }
+  }
 
   // L2 cache stats
   if (!m_memory_config->m_L2_config.disabled()) {

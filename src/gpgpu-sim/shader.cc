@@ -1844,6 +1844,19 @@ void ldst_unit::print_cache_stats(FILE *fp, unsigned &dl1_accesses,
   }
 }
 
+extra_cache_stats ldst_unit::get_extra_stats() const {
+  if (m_L1D) {
+    return m_L1D->get_extra_stats();
+  }
+  return extra_cache_stats();
+}
+
+void ldst_unit::clear_extra_stats() {
+  if (m_L1D) {
+    m_L1D->clear_extra_stats();
+  }
+}
+
 void ldst_unit::get_cache_stats(cache_stats &cs) {
   // Adds stats to 'cs' from each cache
   if (m_L1D) cs += m_L1D->get_stats();
@@ -3199,13 +3212,17 @@ void gpgpu_sim::shader_print_cache_stats(FILE *fout) const {
 
       fprintf(stdout,
               "\tL1D_cache_core[%d]: Access = %llu, Miss = %llu, Miss_rate = "
-              "%.3lf, Pending_hits = %llu, Reservation_fails = %llu\n",
+              "%.3lf, Pending_hits = %llu, Reservation_fails = %llu,"
+              "Dirty_Evictions = %llu, Dirty_Evictions_no_reuse = %llu, All_Evictions = %llu, Hit_other_sid = %llu\n",
               i, css.accesses, css.misses,
               (double)css.misses / (double)css.accesses, css.pending_hits,
-              css.res_fails);
-
+              css.res_fails, css.evictions, css.evictions_no_reuse, css.all_evictions, css.hit_other_sid);
       total_css += css;
     }
+    // clean all evictions
+    //for (unsigned i = 0; i < m_shader_config->n_simt_clusters; i++) {
+    //  m_cluster[i]->clear_all_evictions();
+    //}
     fprintf(fout, "\tL1D_total_cache_accesses = %llu\n", total_css.accesses);
     fprintf(fout, "\tL1D_total_cache_misses = %llu\n", total_css.misses);
     if (total_css.accesses > 0) {
@@ -3219,6 +3236,19 @@ void gpgpu_sim::shader_print_cache_stats(FILE *fout) const {
     // print out eviction stats
     fprintf(fout, "\tL1D_total_cache_evictions = %llu\n", total_css.evictions);
     fprintf(fout, "\tL1D_total_cache_evictions_no_reuse = %llu\n", total_css.evictions_no_reuse);
+    fprintf(fout, "\tL1D_total_cache_all_evictions = %llu\n", total_css.all_evictions);
+    fprintf(fout, "\tL1D_total_cache_hit_other_sid = %llu\n", total_css.hit_other_sid);
+
+    if (total_css.total_probe_count > 0) {
+      fprintf(fout, "\tL1D_total_cache_hit_other_sid_rate(probe) = %.4lf\n",
+              (double)total_css.hit_other_sid / (double)total_css.total_probe_count);
+    }
+
+    if (total_css.total_hit_count > 0) {
+      fprintf(fout, "\tL1D_total_cache_hit_rate(hit) = %.4lf\n",
+              (double)total_css.hit_other_sid / (double)total_css.total_hit_count);
+    }
+
     total_css.print_port_stats(fout, "\tL1D_cache");
   }
 
@@ -4137,6 +4167,15 @@ void shader_core_ctx::print_cache_stats(FILE *fp, unsigned &dl1_accesses,
   m_ldst_unit->print_cache_stats(fp, dl1_accesses, dl1_misses);
 }
 
+
+extra_cache_stats shader_core_ctx::get_extra_stats() const {
+  return m_ldst_unit->get_extra_stats();
+}
+
+void shader_core_ctx::clear_extra_stats() {
+  m_ldst_unit->clear_extra_stats();
+}
+
 void shader_core_ctx::print(FILE *fp) const {
   m_ldst_unit->print(fp);
 }
@@ -5010,7 +5049,23 @@ void simt_core_cluster::get_L1D_sub_stats(struct cache_sub_stats &css) const {
     total_css += temp_css;
   }
   css = total_css;
+
+  extra_cache_stats extra_stats;
+  for (unsigned i = 0; i < m_config->n_simt_cores_per_cluster; ++i) {
+    extra_stats = extra_stats + m_core[i]->get_extra_stats();
+  }
+  css.all_evictions += extra_stats.m_all_evictions;
+  css.hit_other_sid += extra_stats.m_hit_other_sid;
+  css.total_probe_count += extra_stats.m_total_probe_count;
+  css.total_hit_count += extra_stats.m_total_hit_count;
 }
+
+void simt_core_cluster::clear_extra_stats() {
+  for (unsigned i = 0; i < m_config->n_simt_cores_per_cluster; ++i) {
+    m_core[i]->clear_extra_stats();
+  }
+}
+
 void simt_core_cluster::get_L1C_sub_stats(struct cache_sub_stats &css) const {
   struct cache_sub_stats temp_css;
   struct cache_sub_stats total_css;
