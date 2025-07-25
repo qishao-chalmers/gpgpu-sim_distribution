@@ -225,6 +225,24 @@ struct CUstream_st;
 extern std::map<void *, void **> pinned_memory;
 extern std::map<void *, size_t> pinned_memory_size;
 
+
+  // Adaptive core allocation data structures
+  struct KernelPerfProf {
+    // this could change the policy locally
+    double pf_sector32_ipc = 0;      // IPC when running with prefetch sector 32
+    double pf_sector64_ipc = 0;      // IPC when running with prefetch sector 64
+    double pf_sector96_ipc = 0;      // IPC when running with prefetch sector 96
+    double pf_sector128_ipc = 0;     // IPC when running with prefetch sector 128
+    // this will influence the CTA scheduling policy
+    double l1_shared_ratio = 0;      // data share ratio betteen SMs
+    // this will influence both the local policy and the CTA scheduling policy
+    double bypass_ipc = 0;           // IPC when running with L1 bypass
+    bool prefers_interleaved = false;// Whether stream prefers interleaved allocation
+    bool prefers_contiguous = false;// Whether stream prefers contiguous allocation
+    bool sampling_complete = false;// Whether sampling phase is complete
+  };
+
+
 class kernel_info_t {
  public:
   //   kernel_info_t()

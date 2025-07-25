@@ -2004,6 +2004,10 @@ class shader_core_stats : public shader_core_stats_pod {
 
   void print(FILE *fout) const;
 
+  double get_ipc(unsigned core_id) const {
+    return double(m_num_sim_insn[core_id]) / double(shader_cycles[core_id]);
+  }
+
   const std::vector<std::vector<unsigned>> &get_dynamic_warp_issue() const {
     return m_shader_dynamic_warp_issue_distro;
   }
@@ -2618,6 +2622,13 @@ class shader_core_ctx : public core_t {
   void release_shader_resource_1block(unsigned hw_ctaid, kernel_info_t &kernel);
   int find_available_hwtid(unsigned int cta_size, bool occupy);
 
+  void set_bypassL1D(bool bypass) {
+    bypassL1D = bypass;
+  }
+  bool get_bypassL1D() const {
+    return bypassL1D;
+  }
+
  private:
   unsigned int m_occupied_n_threads;
   unsigned int m_occupied_shmem;
@@ -2625,6 +2636,7 @@ class shader_core_ctx : public core_t {
   unsigned int m_occupied_ctas;
   std::bitset<MAX_THREAD_PER_SM> m_occupied_hwtid;
   std::map<unsigned int, unsigned int> m_occupied_cta_to_hwtid;
+  bool bypassL1D = false;
 };
 
 class exec_shader_core_ctx : public shader_core_ctx {

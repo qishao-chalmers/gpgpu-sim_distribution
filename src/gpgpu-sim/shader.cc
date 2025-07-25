@@ -532,6 +532,9 @@ void shader_core_ctx::reinit(unsigned start_thread, unsigned end_thread,
 void shader_core_ctx::init_warps(unsigned cta_id, unsigned start_thread,
                                  unsigned end_thread, unsigned ctaid,
                                  int cta_size, kernel_info_t &kernel) {
+  // print out the kernel name and m_sid
+  //printf("init_warps: kernel %s, core %u, cycle %llu, cta_id %u ctaid %u\n",
+  //kernel.name().c_str(), m_sid, m_gpu->gpu_sim_cycle, cta_id, ctaid);
   address_type start_pc = next_pc(start_thread);
   unsigned kernel_id = kernel.get_uid();
   if (m_config->model == POST_DOMINATOR) {
@@ -617,6 +620,13 @@ float shader_core_ctx::get_current_occupancy(unsigned long long &active,
 void shader_core_stats::print(FILE *fout) const {
   unsigned long long thread_icount_uarch = 0;
   unsigned long long warp_icount_uarch = 0;
+
+  // print out the ipc of each core
+  for (unsigned i = 0; i < m_config->num_shader(); i++) {
+    if (shader_cycles[i] > 0 && m_num_sim_insn[i] > 0) {
+      fprintf(fout, "core %d ipc = %.4lf\n", i, (double)m_num_sim_insn[i] / (double)shader_cycles[i]);
+    }
+  }
 
   for (unsigned i = 0; i < m_config->num_shader(); i++) {
     thread_icount_uarch += m_num_sim_insn[i];
@@ -2123,8 +2133,8 @@ mem_stage_stall_type ldst_unit::process_memory_access_queue_l1cache(
           m_mf_allocator->alloc(inst, inst.accessq_back(),
                                 m_core->get_gpu()->gpu_sim_cycle +
                                     m_core->get_gpu()->gpu_tot_sim_cycle);
-      //printf("process_memory_access_queue_l1cache mf: %p,addr: %lx, core id %d\n",
-      //       mf, mf->get_addr(), m_sid);
+      //printf("process_memory_access_queue_l1cache mf: %p,addr: %lx, core id %d isprefetch %d\n",
+      //      mf, mf->get_addr(), m_sid, mf->get_is_prefetch());
       //mf->print(stdout, true);
       unsigned bank_id = m_config->m_L1D_config.set_bank(mf->get_addr());
       assert(bank_id < m_config->m_L1D_config.l1_banks);
@@ -3080,6 +3090,13 @@ void shader_core_ctx::register_cta_thread_exit(unsigned cta_num,
     m_n_active_cta--;
     m_barriers.deallocate_barrier(cta_num);
     shader_CTA_count_unlog(m_sid, 1);
+
+    // print out the ipc from stats and the kernel name
+    //if (m_stats->m_num_sim_insn[m_sid] > 0) {
+    //  fprintf(stdout, "core %d ipc = %.4lf, kernel %p name %s, cta %u, cycle %llu, tot_cycle %llu\n",
+    //  m_sid, m_stats->get_ipc(m_sid), kernel, kernel->name().c_str(), cta_num, m_gpu->gpu_sim_cycle, m_gpu->gpu_tot_sim_cycle);
+    //  m_gpu->profile_kernel_stats(m_sid, m_stats->get_ipc(m_sid), kernel);
+    //}
 
     SHADER_DPRINTF(
         LIVENESS,
@@ -4723,9 +4740,9 @@ unsigned simt_core_cluster::issue_block2core() {
         if (m_core[core]->get_not_completed() == 0) {
           kernel_info_t *k = m_gpu->select_kernel(m_core[core]->get_sid());
           if (k) {
-            //printf("Selecting kernel %s streamId %d for core %u sid %d\n",
-            //     k ? k->name().c_str() : "NULL", k->get_streamID(),core,
-            //     m_core[core]->get_sid());
+            printf("Selecting kernel %s streamId %d for core %u sid %d\n",
+                 k ? k->name().c_str() : "NULL", k->get_streamID(), core,
+                 m_core[core]->get_sid());
             m_core[core]->set_kernel(k);
           }
           kernel = k;
@@ -4755,8 +4772,9 @@ unsigned simt_core_cluster::issue_block2core() {
         //            m_config->max_cta(*kernel)) ) {
       m_core[core]->can_issue_1block(*kernel)) {
       m_core[core]->issue_block2core(*kernel);
-      //printf("Issuing block to core %u, kernel %s, streamId %d\n", core,
-      //       kernel->name().c_str(),kernel->get_streamID());
+      // core Id and kernel name and sim cycle
+      //printf("core %u, kernel %s, streamId %lld, cycle %llu\n", core,
+      //       kernel->name().c_str(),kernel->get_streamID(), m_gpu->gpu_sim_cycle);
       num_blocks_issued++;
       m_cta_issue_next_core = core;
       break;

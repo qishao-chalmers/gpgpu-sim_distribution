@@ -70,6 +70,44 @@ class gpgpu_context;
 
 extern tr1_hash_map<new_addr_type, unsigned> address_random_interleaving;
 
+extern std::map<unsigned, unsigned> core_stream_mapping;
+
+extern std::map<unsigned long long, std::set<unsigned>> global_dynamic_core_ranges;
+
+extern std::set<unsigned long long> global_unique_streams;
+
+// Policy performance statistics collection
+struct PolicyStats {
+    double odd_ipc = 0.0;
+    double even_ipc = 0.0;
+    double total_ipc = 0.0;
+    unsigned odd_cta_count = 0;
+    unsigned even_cta_count = 0;
+    unsigned cta_count = 0;
+    std::string policy_name;
+    
+    PolicyStats() : total_ipc(0.0), cta_count(0), policy_name("") {}
+    
+    double get_average_ipc() const {
+        if (odd_cta_count > 0 && even_cta_count > 0) {
+            return (odd_ipc * odd_cta_count + even_ipc * even_cta_count) / (odd_cta_count + even_cta_count);
+        } else {
+            return 0.0;
+        }
+    }
+
+    unsigned get_min_cta_count() const {
+        return std::min(odd_cta_count, even_cta_count);
+    }
+
+    unsigned get_max_cta_count() const {
+        return std::max(odd_cta_count, even_cta_count);
+    }
+};
+
+// Global policy statistics
+extern std::map<std::string, PolicyStats> policy_performance_stats;
+
 // SST communication functions
 /**
  * @brief Check if SST requests buffer is full
@@ -493,6 +531,8 @@ class gpgpu_sim_config : public power_config,
 
   bool get_stream_intlv_core() const { return gpgpu_stream_intlv_core; }
 
+  bool get_dynamic_core_scheduling() const { return gpgpu_dynamic_core_scheduling; }
+
   /**
    * @brief Check if we are in SST mode
    *
@@ -565,6 +605,7 @@ class gpgpu_sim_config : public power_config,
   unsigned int gpgpu_compute_capability_minor;
   unsigned long long liveness_message_freq;
   bool gpgpu_stream_intlv_core;
+  bool gpgpu_dynamic_core_scheduling;
 
   friend class gpgpu_sim;
   friend class sst_gpgpu_sim;
@@ -667,10 +708,14 @@ class gpgpu_sim : public gpgpu_t {
   int shader_clock() const;
   int max_cta_per_core() const;
   int get_max_cta(const kernel_info_t &k) const;
+  shader_core_ctx *get_core_by_sid(unsigned sid) const;
   const struct cudaDeviceProp *get_prop() const;
   enum divergence_support_t simd_model() const;
 
   void release_core_range_limit();
+
+  void dynamic_scheduling_set_shared_cores(bool is_stream0_bypass = false, bool is_stream1_bypass = false);
+  void dynamic_scheduling_exclusive(bool is_stream0_bypass = false, bool is_stream1_bypass = false);
 
   unsigned threads_per_core() const;
   bool get_more_cta_left() const;
@@ -731,6 +776,9 @@ class gpgpu_sim : public gpgpu_t {
    */
   bool is_SST_mode() { return m_config.is_SST_mode(); }
 
+  // Add this line:
+  void update_core_allocation_for_policy(const std::string& policy);
+
   // backward pointer
   class gpgpu_context *gpgpu_ctx;
 
@@ -785,6 +833,9 @@ class gpgpu_sim : public gpgpu_t {
   double dram_time;
   double l2_time;
 
+  // dynamic core scheduling
+  bool dynamic_scheduling_configured = false;
+
   // debug
   bool gpu_deadlock;
 
@@ -818,6 +869,9 @@ class gpgpu_sim : public gpgpu_t {
   void clear_executed_kernel_info();  //< clear the kernel information after
                                       // stat printout
   virtual void createSIMTCluster() = 0;
+
+  // stream prefer bypass l1 cache
+  std::map<unsigned, bool> stream_prefer_bypass_l1_cache;
 
  public:
   unsigned long long gpu_sim_insn;
@@ -857,6 +911,11 @@ class gpgpu_sim : public gpgpu_t {
   bool has_special_cache_config(std::string kernel_name);
   void change_cache_config(FuncCache cache_config);
   void set_cache_config(std::string kernel_name);
+
+  void profile_kernel_stats(unsigned m_sid, double ipc, kernel_info_t *kernel);
+  void dynamic_core_scheduling();
+  std::string determine_policy_for_core(unsigned core_id);
+  void print_policy_comparison();
 
   // Jin: functional simulation for CDP
  protected:

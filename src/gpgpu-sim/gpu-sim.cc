@@ -89,6 +89,11 @@ bool g_interactive_debugger_enabled = false;
 
 tr1_hash_map<new_addr_type, unsigned> address_random_interleaving;
 
+std::map<unsigned, unsigned> core_stream_mapping;
+std::map<std::string, PolicyStats> policy_performance_stats;
+std::map<unsigned long long, std::set<unsigned>> global_dynamic_core_ranges;
+std::set<unsigned long long> global_unique_streams;
+
 /* Clock Domains */
 
 #define CORE 0x01
@@ -755,6 +760,8 @@ void gpgpu_sim_config::reg_options(option_parser_t opp) {
       "10000:0");
   option_parser_register(opp, "-gpgpu_stream_intlv_core", OPT_BOOL, &gpgpu_stream_intlv_core,
   "interleave the cores of the two streams (default = disabled)", "0");
+  option_parser_register(opp, "-gpgpu_dynamic_core_scheduling", OPT_BOOL, &gpgpu_dynamic_core_scheduling,
+    "dynamic core scheduling (default = disabled)", "0");
   option_parser_register(opp, "-liveness_message_freq", OPT_INT64,
                          &liveness_message_freq,
                          "Minimum number of seconds between simulation "
@@ -1002,6 +1009,7 @@ kernel_info_t *gpgpu_sim::select_kernel() {
 }
 
 kernel_info_t *gpgpu_sim::select_kernel(unsigned core_id) {
+  kernel_info_t *kernel = NULL;
   unsigned total_cores = m_config.num_shader();
   // choose which stream current core belongs to
   
@@ -1012,15 +1020,30 @@ kernel_info_t *gpgpu_sim::select_kernel(unsigned core_id) {
   } else if (m_config.get_stream_intlv_core()) {
     if (core_id % 2 == 0)
       isStreamOne = true;
+  } else if (m_config.get_dynamic_core_scheduling()) {
+    isStreamOne = core_stream_mapping[core_id] == 0;
   } else {
     isStreamOne = core_id < total_cores/2;
   }
 
   if (isStreamOne ) {
-    return select_kernel(core_id, m_running_kernels_stream1, m_last_issued_kernel_stream1);
+    kernel = select_kernel(core_id, m_running_kernels_stream1, m_last_issued_kernel_stream1);
   } else {
-    return select_kernel(core_id, m_running_kernels_stream2, m_last_issued_kernel_stream2);
+    kernel = select_kernel(core_id, m_running_kernels_stream2, m_last_issued_kernel_stream2);
   }
+
+  // in dynamic core mode, check the core id with kernel stream ID
+  if (m_config.get_dynamic_core_scheduling()) {
+    if (kernel) {
+      if (kernel->get_streamID() != core_stream_mapping[core_id]) {
+        printf("kernel stream ID %u, core stream ID %u, kernel name %s\n",
+        kernel->get_streamID(), core_stream_mapping[core_id], kernel->name().c_str());
+        assert (false);
+      }
+    }
+  }
+
+  return kernel;
 }
 
 kernel_info_t *gpgpu_sim::select_kernel(unsigned core_id, std::vector<kernel_info_t *> &m_running_kernels_stream, unsigned &m_last_issued_kernel_stream) {
@@ -1041,8 +1064,8 @@ kernel_info_t *gpgpu_sim::select_kernel(unsigned core_id, std::vector<kernel_inf
       m_executed_kernel_names.push_back(
           m_running_kernels_stream[m_last_issued_kernel_stream]->name());
 
-      printf("select_kernel core_id %u, stream %u kernel %s\n",
-      core_id, m_last_issued_kernel_stream, m_running_kernels_stream[m_last_issued_kernel_stream]->name().c_str());
+     //printf("select_kernel core_id %u, stream %u kernel %s\n",
+     //core_id, m_last_issued_kernel_stream, m_running_kernels_stream[m_last_issued_kernel_stream]->name().c_str());
     }
 
     return m_running_kernels_stream[m_last_issued_kernel_stream];
@@ -1075,8 +1098,8 @@ kernel_info_t *gpgpu_sim::select_kernel(unsigned core_id, std::vector<kernel_inf
       m_executed_kernel_uids.push_back(launch_uid);
       m_executed_kernel_names.push_back(m_running_kernels_stream[idx]->name());
 
-      printf("select_kernel switch core_id %u, kernelId %u kernel %s\n",
-      core_id, m_last_issued_kernel_stream, m_running_kernels_stream[idx]->name().c_str());
+     //printf("select_kernel switch core_id %u, kernelId %u kernel %s\n",
+     //core_id, m_last_issued_kernel_stream, m_running_kernels_stream[idx]->name().c_str());
 
       return m_running_kernels_stream[idx];
     }
@@ -1294,6 +1317,12 @@ int gpgpu_sim::max_cta_per_core() const {
 
 int gpgpu_sim::get_max_cta(const kernel_info_t &k) const {
   return m_shader_config->max_cta(k);
+}
+
+shader_core_ctx *gpgpu_sim::get_core_by_sid(unsigned sid) const {
+  unsigned cluster_id = m_shader_config->sid_to_cluster(sid);
+  unsigned core_id = m_shader_config->sid_to_cid(sid);
+  return m_cluster[cluster_id]->get_core(core_id);
 }
 
 void gpgpu_sim::set_prop(cudaDeviceProp *prop) { m_cuda_properties = prop; }
@@ -1658,6 +1687,297 @@ void gpgpu_sim::clear_executed_kernel_info() {
   m_executed_kernel_names.clear();
   m_executed_kernel_uids.clear();
 }
+
+//fprintf(stdout, "core %d ipc = %.4lf, kernel %p name %s, cta %u, cycle %llu, tot_cycle %llu\n",
+//m_sid, m_stats->get_ipc(m_sid), kernel, kernel->name().c_str(), cta_num, m_gpu->gpu_sim_cycle, m_gpu->gpu_tot_sim_cycle);
+
+void gpgpu_sim::profile_kernel_stats(unsigned m_sid, double ipc, kernel_info_t *kernel){
+    // for two streams, in the beginning, we will first allocate 40% of cores to two streams in interleaved mode    
+    // consider SM pairs:
+    // SM0/SM1 will be shared by two streams, sharing L1 cache
+    // SM2/SM3 will be shared by two streams, SM2 bypasses L1 cache
+    // SM4/SM5 will be shared by two streams, SM4 bypasses L1 cache
+    // SM6/SM7 will be used by stream 0 exclusively, sharing L1 cache
+    // SM8/SM9 will be used by stream 1 exclusively, sharing L1 cache
+    // stream 0 will be using: 0,2,4,6,7,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40
+    // stream 1 will be using: 1,3,5,8,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41
+
+    std::string kernel_name = kernel->name();
+    // Determine which policy this CTA belongs to based on core ID
+    std::string policy_name = determine_policy_for_core(m_sid);
+    
+    // Update statistics for this policy
+    if (policy_performance_stats.find(policy_name) == policy_performance_stats.end()) {
+        policy_performance_stats[policy_name] = PolicyStats();
+        policy_performance_stats[policy_name].policy_name = policy_name;
+    }
+    
+    PolicyStats& stats = policy_performance_stats[policy_name];
+
+    if (m_sid % 2 == 0) {
+        stats.even_ipc = (stats.even_ipc * stats.even_cta_count + ipc) / (stats.even_cta_count + 1.0);
+        stats.even_cta_count++;
+    } else {
+        stats.odd_ipc = (stats.odd_ipc * stats.odd_cta_count + ipc) / (stats.odd_cta_count + 1.0);
+        stats.odd_cta_count++;
+    }
+    stats.total_ipc += ipc;
+    stats.cta_count++;
+    if (policy_name == "exclusive_stream0" && kernel->get_streamID() != 0) {
+      printf("kernel stream ID %u, core stream ID %u, kernel name %s core ID %u\n",
+      kernel->get_streamID(), core_stream_mapping[m_sid], kernel->name().c_str(), m_sid);
+      assert (false);
+    } else if (policy_name == "exclusive_stream1" && kernel->get_streamID() != 1) {
+      printf("kernel stream ID %u, core stream ID %u, kernel name %s core ID %u\n",
+      kernel->get_streamID(), core_stream_mapping[m_sid], kernel->name().c_str(), m_sid);
+      assert (false);
+    }
+
+    //printf("CTA completed on core %u (policy: %s) - IPC: %.4f, kernel: %s stream: %u/%u\n", 
+    //       m_sid, policy_name.c_str(), ipc, kernel_name.c_str(), core_stream_mapping[m_sid], kernel->get_streamID());
+    //printf("Policy %s stats: total IPC: %.4f, CTA count: %u, avg IPC: %.4f, odd IPC: %.4f, even IPC: %.4f\n",
+    //       policy_name.c_str(), stats.total_ipc, stats.cta_count, stats.get_average_ipc(), stats.odd_ipc, stats.even_ipc);
+
+    // dynamic core scheduling
+    dynamic_core_scheduling();
+}
+
+void gpgpu_sim::dynamic_core_scheduling() {
+
+  bool notready_to_schedule = false;
+  for (auto& pair : policy_performance_stats) {
+    const PolicyStats& stats = pair.second;
+    if (stats.get_min_cta_count() < 2) {
+      notready_to_schedule = true;
+    }
+  }
+
+  if (notready_to_schedule) {
+    return;
+  }
+
+  if (dynamic_scheduling_configured) {
+    return;
+  }
+
+  dynamic_scheduling_configured = true;
+
+  print_policy_comparison();
+
+  // choose the best policy based on performance metrics
+  std::string best_policy = "";
+  double best_score = 0.0;
+
+  // we can create a new policy here, that is bypass bypass, by geting the ipc of even core from bypass_share
+  // and odd core from shared_l1_cache then compare the ipc of the two
+  double stream0_bypass_ipc = 0.0;
+  unsigned stream0_bypass_cta_count = 0;
+  double stream1_bypass_ipc = 0.0;
+  unsigned stream1_bypass_cta_count = 0;
+
+  for (auto& pair : policy_performance_stats) {
+    const PolicyStats& stats = pair.second;
+    if (stats.policy_name == "bypass_share") {
+      stream0_bypass_ipc = stats.even_ipc;
+      stream0_bypass_cta_count = stats.even_cta_count;
+    } else if (stats.policy_name == "share_bypass ") {
+      stream1_bypass_ipc = stats.odd_ipc;
+      stream1_bypass_cta_count = stats.odd_cta_count;
+    }
+  }
+
+  //now we can create a new policy that is bypass bypass and insert it into the policy_performance_stats
+  PolicyStats bypass_bypass_stats;
+  bypass_bypass_stats.policy_name = "bypass_bypass";
+  bypass_bypass_stats.even_ipc = stream0_bypass_ipc;
+  bypass_bypass_stats.even_cta_count = stream0_bypass_cta_count;
+  bypass_bypass_stats.odd_ipc = stream1_bypass_ipc;
+  bypass_bypass_stats.odd_cta_count = stream1_bypass_cta_count;
+  policy_performance_stats["bypass_bypass"] = bypass_bypass_stats;
+  
+  for (auto& pair : policy_performance_stats) {
+    const PolicyStats& stats = pair.second;
+    double avg_ipc = stats.get_average_ipc();
+    // lets just compare the ipc of all the policies and choose the one with the highest ipc
+    if (avg_ipc > best_score) {
+      best_score = avg_ipc;
+      best_policy = stats.policy_name;
+    }
+  }
+  
+  // Apply the best policy
+  if (!best_policy.empty()) {
+    printf("DYNAMIC SCHEDULING: Selected policy '%s' with score %.4f\n", 
+           best_policy.c_str(), best_score);
+    
+    // Update core allocations based on the best policy
+    update_core_allocation_for_policy(best_policy);
+  }
+}
+
+
+void gpgpu_sim::update_core_allocation_for_policy(const std::string& policy) {
+  // first reset all core to not bypass L1
+  for (unsigned core_id = 0; core_id < m_config.num_shader(); core_id++) {
+    shader_core_ctx *core = get_core_by_sid(core_id);
+    if (core) {
+      core->set_bypassL1D(false);
+    }
+  }
+
+  // Update core allocations based on the selected policy
+  if (policy == "shared_l1_cache") {
+    printf("Applying shared L1 cache policy\n");
+    // Core allocation remains as is - both cores share L1 cache
+    dynamic_scheduling_set_shared_cores();
+  } else if (policy == "share_bypass") {
+    // Shared with bypass policy: One core bypasses L1, other uses full cache
+    printf("Applying shared with bypass policy\n");
+    dynamic_scheduling_set_shared_cores(false, true);
+  } else if (policy == "bypass_share") {
+    printf("Applying bypass share policy\n");
+    dynamic_scheduling_set_shared_cores(true, false);
+  } else if (policy == "bypass_bypass") {
+    printf("Applying bypass bypass policy\n");
+    dynamic_scheduling_set_shared_cores(true, true);
+  } else if (policy == "exclusive_stream0" || policy == "exclusive_stream1") {
+    // Exclusive stream policy: Dedicated cores for each stream
+    printf("Applying exclusive stream policy: %s\n", policy.c_str());
+    dynamic_scheduling_exclusive(false, false);
+  } else {
+    assert (false);
+    // Default policy: No special allocation
+    printf("Applying default allocation policy\n");
+  }
+}
+
+std::string gpgpu_sim::determine_policy_for_core(unsigned core_id) {
+    // Determine policy based on core ID and current allocation
+    // This maps to the allocation strategy you described
+    
+    // Check if this core is in the dynamic allocation range
+    if (core_stream_mapping.find(core_id) != core_stream_mapping.end()) {        
+        // Determine policy based on core position
+        if (core_id % 10 == 0 || core_id % 10 == 1) {
+            return "shared_l1_cache";  // SM0/SM1 - shared L1 cache
+        } else if (core_id % 10 == 2 || core_id % 10 == 3) {
+            return "share_bypass";  // SM2/SM3 - shared with bypass
+        } else if (core_id % 10 == 4 || core_id % 10 == 5) {
+            return "bypass_share";  // SM4/SM5 - shared with bypass
+        } else if (core_id % 10 == 6 || core_id % 10 == 7) {
+            return "exclusive_stream0";
+        } else if (core_id % 10 == 8 || core_id % 10 == 9) {
+            return "exclusive_stream1";
+        }
+    }
+    
+    // Default policy for cores not in dynamic allocation
+    return "default_allocation";
+}
+
+void gpgpu_sim::print_policy_comparison() {
+    printf("\n=== POLICY PERFORMANCE COMPARISON ===\n");
+    printf("%-20s %-12s %-12s %-12s\n", "Policy", "Total IPC", "CTA Count", "Avg IPC");
+    printf("------------------------------------------------\n");
+    
+    std::string best_policy = "";
+    double best_avg_ipc = 0.0;
+    
+    for (const auto& pair : policy_performance_stats) {
+        const PolicyStats& stats = pair.second;
+        printf("%-20s %-12.4f %-12u %-12.4f\n", 
+               stats.policy_name.c_str(), 
+               stats.total_ipc, 
+               stats.cta_count, 
+               stats.get_average_ipc());
+        
+        if (stats.get_average_ipc() > best_avg_ipc) {
+            best_avg_ipc = stats.get_average_ipc();
+            best_policy = stats.policy_name;
+        }
+    }
+    
+    printf("\n=== OPTIMAL POLICY RECOMMENDATION ===\n");
+    printf("Best performing policy: %s (Avg IPC: %.4f)\n", 
+           best_policy.c_str(), best_avg_ipc);
+    
+    // Provide recommendations based on results
+    printf("\n=== POLICY RECOMMENDATIONS ===\n");
+    if (best_policy == "shared_l1_cache") {
+        printf("Recommendation: Use shared L1 cache policy for better performance\n");
+    } else if (best_policy == "shared_bypass_l1") {
+        printf("Recommendation: Use shared with L1 bypass policy for better performance\n");
+    } else if (best_policy == "exclusive_stream0" || best_policy == "exclusive_stream1") {
+        printf("Recommendation: Use exclusive stream allocation for better performance\n");
+    } else {
+        printf("Recommendation: Default allocation performs best\n");
+    }
+}
+
+void gpgpu_sim::dynamic_scheduling_set_shared_cores(
+  bool is_stream0_bypass,  bool is_stream1_bypass) {
+  // clear the global_stream_core_ranges_set
+  global_dynamic_core_ranges.clear();
+  
+  // Create sorted stream list for consistent core assignment
+  std::vector<unsigned long long> stream_list(global_unique_streams.begin(), global_unique_streams.end());
+  std::sort(stream_list.begin(), stream_list.end());
+
+  unsigned total_cores = get_config().num_shader();
+
+  for (unsigned i = 0; i < stream_list.size(); i++) {
+    std::set<unsigned> core_range;
+    unsigned long long stream_id = stream_list[i];
+    unsigned start_core = stream_id == 0 ? 0 :1;
+    unsigned end_core = stream_id == 0 ? total_cores -2 : total_cores -1;
+    for (unsigned core = start_core; core <= end_core; core+=2) {
+      core_range.insert(core);
+    }
+    global_dynamic_core_ranges[stream_id] = core_range;
+    std::cout << "GLOBAL: STREAM " << stream_id << " -> cores [" << start_core << "-" << end_core << "]" << std::endl;
+  }
+
+  if (is_stream0_bypass) {
+    for (unsigned core_id = 0; core_id < total_cores; core_id+=2) {
+      shader_core_ctx *core = get_core_by_sid(core_id);
+      core->set_bypassL1D(true);
+    }
+  } else if (is_stream1_bypass) {
+    for (unsigned core_id = 1; core_id < total_cores; core_id+=2) {
+      shader_core_ctx *core = get_core_by_sid(core_id);
+      core->set_bypassL1D(true);
+    }
+  }
+}
+
+void gpgpu_sim::dynamic_scheduling_exclusive(
+  bool is_stream0_bypass, bool is_stream1_bypass) {
+  // clear the global_stream_core_ranges_set
+  global_dynamic_core_ranges.clear();
+
+  // Create sorted stream list for consistent core assignment
+  std::vector<unsigned long long> stream_list(global_unique_streams.begin(), global_unique_streams.end());
+  std::sort(stream_list.begin(), stream_list.end());
+
+  unsigned total_cores = get_config().num_shader();
+
+  // stream 0 use half of the cores
+  // stream 1 use the other half
+
+  for (unsigned i = 0; i < stream_list.size(); i++) {
+    std::set<unsigned> core_range;
+    unsigned long long stream_id = stream_list[i];
+    unsigned start_core = stream_id == 0 ? 0 : total_cores/2;
+    unsigned end_core = stream_id == 0 ? total_cores/2 -1 : total_cores -1;
+    for (unsigned core = start_core; core <= end_core; core++) {
+      core_range.insert(core);
+    }
+    global_dynamic_core_ranges[stream_id] = core_range;
+    std::cout << "GLOBAL: STREAM " << stream_id << " -> cores [" << start_core << "-" << end_core << "]" << std::endl;
+  }
+
+}
+
 
 void gpgpu_sim::gpu_print_stat(unsigned long long streamID) {
   FILE *statfout = stdout;
