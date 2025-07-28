@@ -91,6 +91,7 @@ tr1_hash_map<new_addr_type, unsigned> address_random_interleaving;
 
 std::map<unsigned, unsigned> core_stream_mapping;
 std::map<std::string, PolicyStats> policy_performance_stats;
+std::map<std::string, std::vector<PolicyStats>> policy_performance_stats_vector;
 std::map<unsigned long long, std::set<unsigned>> global_dynamic_core_ranges;
 std::set<unsigned long long> global_unique_streams;
 std::map<unsigned,long long > stream_inst_count;
@@ -1706,6 +1707,7 @@ void gpgpu_sim::profile_kernel_stats(unsigned m_sid, double ipc, kernel_info_t *
       return;
     }
 
+    /*
     // for two streams, in the beginning, we will first allocate 40% of cores to two streams in interleaved mode    
     // consider SM pairs:
     // SM0/SM1 will be shared by two streams, sharing L1 cache
@@ -1754,7 +1756,7 @@ void gpgpu_sim::profile_kernel_stats(unsigned m_sid, double ipc, kernel_info_t *
     //       core->get_bypassL1D(), core->get_stream_bypassL1D(0), core->get_stream_bypassL1D(1));
     //printf("Policy %s stats: total IPC: %.4f, CTA count: %u, avg IPC: %.4f, odd IPC: %.4f, even IPC: %.4f\n",
     //       policy_name.c_str(), stats.total_ipc, stats.cta_count, stats.get_average_ipc(), stats.odd_ipc, stats.even_ipc);
-
+    */
     // dynamic core scheduling
     dynamic_core_scheduling();
 }
@@ -1769,44 +1771,16 @@ void gpgpu_sim::dynamic_core_scheduling() {
   // we can start dynamic core scheduling
   bool isWarmup = gpu_core_abs_cycle > 500000;
 
-  //print_policy_comparison();
-
-  // wait for 5 policies to be collected
-  if (policy_performance_stats.size() != 6)
-    return;
+  //bool isWarmup = gpu_core_abs_cycle > 200000;
 
   profile_sample_count++;
-  if (profile_sample_count < 1000 && !isWarmup) {
+  if (profile_sample_count < 2000 && !isWarmup) {
+  //if (profile_sample_count < 500 && !isWarmup) {
     return;
   }
-
-  bool notready_to_schedule = false;
-  for (auto& pair : policy_performance_stats) {
-    const PolicyStats& stats = pair.second;
-    if (stats.get_min_cta_count() < 1000) {
-      notready_to_schedule = true;
-    }
-  }
-
-  if (notready_to_schedule && !isWarmup) {
-    return;
-  }
-
 
   dynamic_scheduling_configured = true;
 
-  // merge exclusive_stream0 and exclusive_stream1 into exclusive
-  PolicyStats exclusive_stats;
-  exclusive_stats.policy_name = "exclusive";
-  exclusive_stats.even_ipc = (policy_performance_stats["exclusive_stream0"].even_ipc + policy_performance_stats["exclusive_stream0"].odd_ipc)/2;
-  exclusive_stats.even_cta_count = (policy_performance_stats["exclusive_stream0"].even_cta_count + policy_performance_stats["exclusive_stream0"].odd_cta_count)/2;
-  exclusive_stats.odd_ipc = (policy_performance_stats["exclusive_stream1"].odd_ipc + policy_performance_stats["exclusive_stream1"].even_ipc)/2;
-  exclusive_stats.odd_cta_count = (policy_performance_stats["exclusive_stream1"].odd_cta_count + policy_performance_stats["exclusive_stream1"].even_cta_count)/2;
-  exclusive_stats.total_ipc = policy_performance_stats["exclusive_stream0"].total_ipc + policy_performance_stats["exclusive_stream1"].total_ipc;
-  exclusive_stats.cta_count = (policy_performance_stats["exclusive_stream0"].cta_count + policy_performance_stats["exclusive_stream1"].cta_count)/2;
-  policy_performance_stats["exclusive"] = exclusive_stats;
-
-  print_policy_comparison();
 
   // get core and print out the ipc from stats and inst count
   for (unsigned core_id = 0; core_id < m_config.num_shader(); core_id++) {
@@ -1816,7 +1790,68 @@ void gpgpu_sim::dynamic_core_scheduling() {
     }
   }
 
+  for (unsigned SM_pair_id = 0; SM_pair_id < m_config.num_shader()/2; SM_pair_id++) {
+    unsigned even_core_id = SM_pair_id*2;
+    unsigned odd_core_id = SM_pair_id*2 + 1;
+    shader_core_ctx *even_core = get_core_by_sid(even_core_id);
+    shader_core_ctx *odd_core = get_core_by_sid(odd_core_id);
 
+    double even_ipc = even_core->get_stats()->get_ipc(even_core_id);  
+    double odd_ipc = odd_core->get_stats()->get_ipc(odd_core_id);
+
+    long long even_inst_count = even_core->get_stats()->m_num_sim_insn[even_core_id];
+    long long odd_inst_count = odd_core->get_stats()->m_num_sim_insn[odd_core_id];
+
+    if (even_ipc > 0 && odd_ipc > 0) {
+      printf("SM pair %u even core ipc: %.4f, odd core ipc: %.4f, even inst count: %lld, odd inst count: %lld\n",
+        SM_pair_id, even_ipc, odd_ipc, even_inst_count, odd_inst_count);
+    } else {
+      continue;
+    }
+
+    std::string policy_name = determine_policy_for_core(even_core_id);
+
+    PolicyStats core_stats;
+    core_stats.even_ipc = even_ipc;
+    core_stats.odd_ipc = odd_ipc;
+    core_stats.even_inst_count = even_inst_count;
+    core_stats.odd_inst_count = odd_inst_count;
+
+    policy_performance_stats_vector[policy_name].push_back(core_stats);
+  }
+
+  // calculate the average of each element in the vector and create policy stats for each policy
+  for (auto& pair : policy_performance_stats_vector) {
+    std::string policy_name = pair.first;
+    std::vector<PolicyStats>& stats_vector = pair.second;
+    PolicyStats avg_stats;
+    avg_stats.policy_name = policy_name;
+    for (auto& stats : stats_vector) {
+      avg_stats.even_ipc += stats.even_ipc;
+      avg_stats.odd_ipc += stats.odd_ipc;
+      avg_stats.even_inst_count += stats.even_inst_count;
+      avg_stats.odd_inst_count += stats.odd_inst_count;
+    }
+    avg_stats.even_ipc /= stats_vector.size();
+    avg_stats.odd_ipc /= stats_vector.size();
+    avg_stats.even_inst_count /= stats_vector.size();
+    avg_stats.odd_inst_count /= stats_vector.size();
+    policy_performance_stats[policy_name] = avg_stats;
+  }
+
+  // merge exclusive_stream0 and exclusive_stream1 into exclusive
+  PolicyStats exclusive_stats;
+  exclusive_stats.policy_name = "exclusive";
+  exclusive_stats.even_ipc = (policy_performance_stats["exclusive_stream0"].even_ipc + policy_performance_stats["exclusive_stream0"].odd_ipc)/2;
+  exclusive_stats.even_cta_count = (policy_performance_stats["exclusive_stream0"].even_cta_count + policy_performance_stats["exclusive_stream0"].odd_cta_count)/2;
+  exclusive_stats.even_inst_count = (policy_performance_stats["exclusive_stream0"].even_inst_count + policy_performance_stats["exclusive_stream0"].odd_inst_count)/2;
+
+  exclusive_stats.odd_ipc = (policy_performance_stats["exclusive_stream1"].odd_ipc + policy_performance_stats["exclusive_stream1"].even_ipc)/2;
+  exclusive_stats.odd_cta_count = (policy_performance_stats["exclusive_stream1"].odd_cta_count + policy_performance_stats["exclusive_stream1"].even_cta_count)/2;
+  exclusive_stats.odd_inst_count = (policy_performance_stats["exclusive_stream1"].odd_inst_count + policy_performance_stats["exclusive_stream1"].even_inst_count)/2;
+  policy_performance_stats["exclusive"] = exclusive_stats;
+
+  print_policy_comparison();
 
   // choose the best policy based on performance metrics
   std::string best_policy = "";
@@ -1842,35 +1877,15 @@ void gpgpu_sim::dynamic_core_scheduling() {
       ipc_improvement = (avg_ipc - baseline_ipc) / baseline_ipc; // Percentage improvement
     }
     
-    // Create fairness-aware metric: IPC + fairness_factor * IPC_improvement
-    // This balances absolute performance with relative improvement
-    double fairness_factor = 0.5; // Weight for improvement consideration
-    //double fairness_score = avg_ipc + fairness_factor * ipc_improvement * avg_ipc;
-    //double fairness_score = stats.even_ipc* stats.even_cta_count + stats.odd_ipc* stats.odd_cta_count;
-    //double fairness_score = stats.even_cta_count + stats.odd_cta_count;
-    double fairness_score = stream_inst_count[0]*stats.even_ipc + stream_inst_count[1]*stats.odd_ipc;
+    double fairness_score = stats.even_inst_count+stats.odd_inst_count;
 
-
-    //double inst_ipc = stream_inst_count[0]*stats.even_ipc + stream_inst_count[1]*stats.odd_ipc;
-
-    // Apply policy-specific weights to the fairness score
-    double weighted_score = fairness_score;
-    if (stats.policy_name == "exclusive") {
-      weighted_score = fairness_score * 1;  // 20% boost for exclusive policy
-    } else if (stats.policy_name == "bypass_bypass") {
-      weighted_score = fairness_score * 1;  // 10% boost for bypass_bypass policy
-    } else if (stats.policy_name == "bypass_share" || stats.policy_name == "share_bypass") {
-      weighted_score = fairness_score * 1; // 5% boost for bypass_share and share_bypass policies
-    }
-    
-    printf("Policy %s weighted score: %.4f, even_ipc: %.4f, even_cta_count: %d, odd_ipc: %.4f, odd_cta_count: %d stream inst count: %lld, %lld\n", 
-           stats.policy_name.c_str(), weighted_score, stats.even_ipc, stats.even_cta_count, stats.odd_ipc, stats.odd_cta_count, stream_inst_count[0], stream_inst_count[1]);
-
-    // Choose the policy with the highest weighted fairness score
-    if (weighted_score > best_score) {
-      best_score = weighted_score;
+    if (fairness_score > best_score) {
+      best_score = fairness_score;
       best_policy = stats.policy_name;
     }
+
+    printf("Policy %s fairness score: %.4f, even ipc/inst_count: %.4f/%lld, odd ipc/inst_count: %.4f/%lld\n", 
+           stats.policy_name.c_str(), fairness_score, stats.even_ipc, stats.even_inst_count, stats.odd_ipc, stats.odd_inst_count);
   }
   
   // Apply the best policy
@@ -1881,6 +1896,22 @@ void gpgpu_sim::dynamic_core_scheduling() {
     // Update core allocations based on the best policy
     update_core_allocation_for_policy(best_policy);
   }
+}
+
+void gpgpu_sim::update_policy_stats(const std::string& policy, PolicyStats& core_stats) {
+  // add stats to policy_performance_stats
+  auto& stats = policy_performance_stats[policy];
+  stats.even_ipc = (stats.even_ipc * stats.even_cta_count + core_stats.even_ipc*core_stats.even_cta_count)/
+                   (stats.even_cta_count + core_stats.even_cta_count);
+  stats.even_cta_count+=core_stats.even_cta_count;
+  stats.even_inst_count+=core_stats.even_inst_count;
+  stats.odd_ipc = (stats.odd_ipc * stats.odd_cta_count + core_stats.odd_ipc*core_stats.odd_cta_count)/
+                (stats.odd_cta_count + core_stats.odd_cta_count);
+  stats.odd_cta_count+=core_stats.odd_cta_count;
+  stats.odd_inst_count+=core_stats.odd_inst_count;
+  stats.total_ipc += core_stats.total_ipc*core_stats.cta_count;
+  stats.cta_count+=core_stats.cta_count;
+  stats.policy_count++;
 }
 
 
@@ -1933,9 +1964,9 @@ std::string gpgpu_sim::determine_policy_for_core(unsigned core_id) {
         if (core_id % 12 == 0 || core_id % 12 == 1) {
             return "shared_l1_cache";  // SM0/SM1 - shared L1 cache
         } else if (core_id % 12 == 2 || core_id % 12 == 3) {
-            return "share_bypass";  // SM2/SM3 - shared with bypass
+            return "bypass_share";  // SM2/SM3 - bypass with share
         } else if (core_id % 12 == 4 || core_id % 12 == 5) {
-            return "bypass_share";  // SM4/SM5 - bypass with share
+            return "share_bypass";  // SM4/SM5 - share with bypass
         } else if (core_id % 12 == 6 || core_id % 12 == 7) {
           return "bypass_bypass";   // SM6/SM7 - bypass bypass
         } else if (core_id % 12 == 8 || core_id % 12 == 9) {
@@ -1954,12 +1985,12 @@ void gpgpu_sim::print_policy_comparison() {
     double exclusive_stream0_ipc = (policy_performance_stats["exclusive_stream0"].even_ipc + policy_performance_stats["exclusive_stream0"].odd_ipc) / 2.0;
     double exclusive_stream1_ipc = (policy_performance_stats["exclusive_stream1"].even_ipc + policy_performance_stats["exclusive_stream1"].odd_ipc) / 2.0;
 
-    long long exclusive_stream0_cta_count = (policy_performance_stats["exclusive_stream0"].even_cta_count + policy_performance_stats["exclusive_stream0"].odd_cta_count) / 2;
-    long long exclusive_stream1_cta_count = (policy_performance_stats["exclusive_stream1"].even_cta_count + policy_performance_stats["exclusive_stream1"].odd_cta_count) / 2;
+    long long exclusive_stream0_inst_count = (policy_performance_stats["exclusive_stream0"].even_inst_count + policy_performance_stats["exclusive_stream0"].odd_inst_count) / 2;
+    long long exclusive_stream1_inst_count = (policy_performance_stats["exclusive_stream1"].even_inst_count + policy_performance_stats["exclusive_stream1"].odd_inst_count) / 2;
     
     // print out odd, even ipc and total ipc
     printf("\n=== IPC ===\n");
-    printf("%-20s %-12s %-12s %-12s %-12s %-12s %-12s %-12s\n", "Policy", "Even IPC", "Even CTA", "Odd IPC", "Odd CTA", "Avg IPC", "IPC Improvement", "Fairness Score", "Weighted Score");
+    printf("%-20s %-12s %-12s %-12s %-12s %-12s %-12s %-12s\n", "Policy", "Even IPC", "Even Inst", "Odd IPC", "Odd Inst", "Avg IPC", "IPC Improvement", "Fairness Score", "Weighted Score");
     printf("--------------------------------------------------------------------------------\n");
     for (const auto& pair : policy_performance_stats) {
         const PolicyStats& stats = pair.second;
@@ -1968,16 +1999,16 @@ void gpgpu_sim::print_policy_comparison() {
         // Calculate IPC improvement compared to baseline exclusive policy
         double ipc_improvement = 0.0;
         if (stats.policy_name != "exclusive") {
-            ipc_improvement = ((stats.even_ipc/exclusive_stream0_ipc)*exclusive_stream0_cta_count
-                            + (stats.odd_ipc/exclusive_stream1_ipc)*exclusive_stream1_cta_count
-                          - 2.0 * (exclusive_stream0_cta_count + exclusive_stream1_cta_count)) /
-                          (2.0 * (exclusive_stream0_cta_count + exclusive_stream1_cta_count)) * 100.0; // Percentage improvement
+            ipc_improvement = ((stats.even_ipc/exclusive_stream0_ipc)*exclusive_stream0_inst_count
+                            + (stats.odd_ipc/exclusive_stream1_ipc)*exclusive_stream1_inst_count
+                          - 2.0 * (exclusive_stream0_inst_count + exclusive_stream1_inst_count)) /
+                          (2.0 * (exclusive_stream0_inst_count + exclusive_stream1_inst_count)) * 100.0; // Percentage improvement
         }
         
         // Create fairness-aware metric
         double fairness_factor = 2;
         //double fairness_score = avg_ipc + fairness_factor * ipc_improvement * avg_ipc / 100.0;
-        double fairness_score = stats.even_ipc* stats.even_cta_count + stats.odd_ipc* stats.odd_cta_count;
+        double fairness_score = stats.even_inst_count + stats.odd_inst_count;
         
         double weighted_score = fairness_score;
         if (stats.policy_name == "exclusive") {
@@ -1990,9 +2021,9 @@ void gpgpu_sim::print_policy_comparison() {
         printf("%-20s %-12.4f %-12d %-12.4f %-12d %-12.4f %-12.2f %-12.4f %-12.4f\n",
                stats.policy_name.c_str(),
                stats.even_ipc,
-               stats.even_cta_count,
+               stats.even_inst_count,
                stats.odd_ipc,
-               stats.odd_cta_count,
+               stats.odd_inst_count,
                avg_ipc,
                ipc_improvement,
                fairness_score,
@@ -2011,16 +2042,20 @@ void gpgpu_sim::print_policy_comparison() {
         // Calculate IPC improvement compared to baseline exclusive policy
         double ipc_improvement = 0.0;
         if (stats.policy_name != "exclusive") {
-          ipc_improvement = ((stats.even_ipc/exclusive_stream0_ipc)*exclusive_stream0_cta_count
-                          + (stats.odd_ipc/exclusive_stream1_ipc)*exclusive_stream1_cta_count
-                        - 2.0 * (exclusive_stream0_cta_count + exclusive_stream1_cta_count)) /
-                        (2.0 * (exclusive_stream0_cta_count + exclusive_stream1_cta_count)) * 100.0; // Percentage improvement
+          ipc_improvement = ((stats.even_ipc/exclusive_stream0_ipc)*exclusive_stream0_inst_count
+                          + (stats.odd_ipc/exclusive_stream1_ipc)*exclusive_stream1_inst_count
+                        - 2.0 * (exclusive_stream0_inst_count + exclusive_stream1_inst_count)) /
+                        (2.0 * (exclusive_stream0_inst_count + exclusive_stream1_inst_count)) * 100.0; // Percentage improvement
         }
         
+        if (stats.policy_name == "exclusive_stream0" || stats.policy_name == "exclusive_stream1") {
+          continue;
+        }
+
         // Create fairness-aware metric: IPC + fairness_factor * IPC_improvement
         double fairness_factor = 2; // Weight for improvement consideration
         //double fairness_score = avg_ipc + fairness_factor * ipc_improvement * avg_ipc;
-        double fairness_score = stats.even_ipc* stats.even_cta_count + stats.odd_ipc* stats.odd_cta_count;
+        double fairness_score = stats.even_inst_count + stats.odd_inst_count;
         
         // Apply policy-specific weights to the fairness score
         double weighted_score = fairness_score;

@@ -160,10 +160,10 @@ class mem_fetch {
   void set_dynamic_fetch_mode(bool mode) { dynamic_fetch_mode = mode; }
   bool get_dynamic_fetch_mode() const { return dynamic_fetch_mode; }
 
-  void set_is_prefetch(bool is_prefetch) { this->is_prefetch = is_prefetch; }
+  void set_is_prefetch(bool is_prefetch) { is_prefetch = is_prefetch; }
   bool get_is_prefetch() const { return is_prefetch; }
 
-  void set_bypassL1D(bool is_bypassL1D) { this->is_bypassL1D = is_bypassL1D; }
+  void set_bypassL1D(bool is_bypassL1D) { is_bypassL1D = is_bypassL1D; }
   bool get_bypassL1D() const { return is_bypassL1D; }
 
  private:

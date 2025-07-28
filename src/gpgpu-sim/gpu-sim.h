@@ -83,9 +83,15 @@ struct PolicyStats {
     double odd_ipc = 0.0;
     double even_ipc = 0.0;
     double total_ipc = 0.0;
-    unsigned odd_cta_count = 0;
-    unsigned even_cta_count = 0;
-    unsigned cta_count = 0;
+    long long odd_inst_count = 0;
+    long long even_inst_count = 0;
+    long long total_inst_count = 0;
+    long long odd_cta_count = 0;
+    long long even_cta_count = 0;
+    long long cta_count = 0;
+
+    unsigned policy_count = 0;
+
     std::string policy_name;
     
     PolicyStats() : total_ipc(0.0), cta_count(0), policy_name("") {}
@@ -106,10 +112,24 @@ struct PolicyStats {
     unsigned get_max_cta_count() const {
         return std::max(odd_cta_count, even_cta_count);
     }
+
+    void reset() {
+        odd_ipc = 0.0;
+        even_ipc = 0.0;
+        total_ipc = 0.0;
+        odd_cta_count = 0;
+        even_cta_count = 0;
+        cta_count = 0;
+        total_inst_count = 0;
+        odd_inst_count = 0;
+        even_inst_count = 0;
+    }
 };
 
 // Global policy statistics
 extern std::map<std::string, PolicyStats> policy_performance_stats;
+
+extern std::map<std::string, std::vector<PolicyStats>> policy_performance_stats_vector;
 
 // SST communication functions
 /**
@@ -920,6 +940,7 @@ class gpgpu_sim : public gpgpu_t {
 
   void profile_kernel_stats(unsigned m_sid, double ipc, kernel_info_t *kernel);
   void dynamic_core_scheduling();
+  void update_policy_stats(const std::string& policy, PolicyStats& core_stats);
   std::string determine_policy_for_core(unsigned core_id);
   void print_policy_comparison();
 

@@ -1988,6 +1988,10 @@ void shader_core_ctx::print_core_stats() {
     m_sid, m_stats->get_ipc(m_sid), m_stats->m_num_sim_insn[m_sid], core_stream_mapping[m_sid]);
 }
 
+shader_core_stats* shader_core_ctx::get_stats() {
+  return m_stats;
+}
+
 void shader_core_ctx::writeback() {
   unsigned max_committed_thread_instructions =
       m_config->warp_size *

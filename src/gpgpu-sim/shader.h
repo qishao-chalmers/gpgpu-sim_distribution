@@ -2202,6 +2202,7 @@ class shader_core_ctx : public core_t {
   void set_max_cta(const kernel_info_t &kernel);
   void warp_inst_complete(const warp_inst_t &inst);
   void print_core_stats();
+  shader_core_stats* get_stats();
 
   // accessors
   std::list<unsigned> get_regs_written(const inst_t &fvt) const;
