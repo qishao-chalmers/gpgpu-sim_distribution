@@ -76,6 +76,8 @@ extern std::map<unsigned long long, std::set<unsigned>> global_dynamic_core_rang
 
 extern std::set<unsigned long long> global_unique_streams;
 
+extern std::map<unsigned,long long > stream_inst_count;
+
 // Policy performance statistics collection
 struct PolicyStats {
     double odd_ipc = 0.0;
@@ -91,6 +93,7 @@ struct PolicyStats {
     double get_average_ipc() const {
         if (odd_cta_count > 0 && even_cta_count > 0) {
             return (odd_ipc * odd_cta_count + even_ipc * even_cta_count) / (odd_cta_count + even_cta_count);
+            //return (odd_ipc + even_ipc) / 2;
         } else {
             return 0.0;
         }
@@ -777,7 +780,9 @@ class gpgpu_sim : public gpgpu_t {
   bool is_SST_mode() { return m_config.is_SST_mode(); }
 
   // Add this line:
-  void update_core_allocation_for_policy(const std::string& policy);
+  void update_core_allocation_for_policy(const std::string& policy,
+                                        bool bypass_bypass_stream0_better = false,
+                                        bool bypass_bypass_stream1_better = false);
 
   // backward pointer
   class gpgpu_context *gpgpu_ctx;
@@ -872,7 +877,8 @@ class gpgpu_sim : public gpgpu_t {
 
   // stream prefer bypass l1 cache
   std::map<unsigned, bool> stream_prefer_bypass_l1_cache;
-
+  
+  unsigned profile_sample_count = 0;
  public:
   unsigned long long gpu_sim_insn;
   unsigned long long gpu_tot_sim_insn;

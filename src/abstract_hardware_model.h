@@ -1161,6 +1161,7 @@ class warp_inst_t : public inst_t {
   warp_inst_t() {
     m_uid = 0;
     m_streamID = (unsigned long long)-1;
+    m_bypassL1D = false;
     m_empty = true;
     m_config = NULL;
 
@@ -1175,6 +1176,7 @@ class warp_inst_t : public inst_t {
   warp_inst_t(const core_config *config) {
     m_uid = 0;
     m_streamID = (unsigned long long)-1;
+    m_bypassL1D = false;
     assert(config->warp_size <= MAX_WARP_SIZE);
     m_config = config;
     m_empty = true;
@@ -1371,11 +1373,15 @@ class warp_inst_t : public inst_t {
   unsigned get_uid() const { return m_uid; }
   unsigned long long get_streamID() const { return m_streamID; }
   unsigned get_schd_id() const { return m_scheduler_id; }
+
+  bool get_bypassL1D() const { return m_bypassL1D; }
+  void set_bypassL1D(bool bypass) { m_bypassL1D = bypass; }
   active_mask_t get_warp_active_mask() const { return m_warp_active_mask; }
 
  protected:
   unsigned m_uid;
   unsigned long long m_streamID;
+  bool m_bypassL1D;
   bool m_empty;
   bool m_cache_hit;
   unsigned long long issue_cycle;

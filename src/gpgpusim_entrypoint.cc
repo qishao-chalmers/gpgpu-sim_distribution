@@ -412,6 +412,7 @@ void gpgpu_context::print_simulation_time() {
   }
   fflush(stdout);
 
+  // if simulation time is longer than 2 hours, exit
   if (h > 2)
     exit(0);
 }

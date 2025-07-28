@@ -93,6 +93,8 @@ std::map<unsigned, unsigned> core_stream_mapping;
 std::map<std::string, PolicyStats> policy_performance_stats;
 std::map<unsigned long long, std::set<unsigned>> global_dynamic_core_ranges;
 std::set<unsigned long long> global_unique_streams;
+std::map<unsigned,long long > stream_inst_count;
+
 
 /* Clock Domains */
 
@@ -448,6 +450,10 @@ void shader_core_config::reg_options(class OptionParser *opp) {
   option_parser_register(opp, "-gpgpu_perfect_mem", OPT_BOOL,
                          &gpgpu_perfect_mem,
                          "enable perfect memory mode (no cache miss)", "0");
+  option_parser_register(opp, "-gpgpu_profile_ipc_instnum_threshold", OPT_UINT32,
+                         &profile_ipc_instnum_threshold,
+                         "threshold of instructions to profile ipc (default = 10000)",
+                         "10000");
   option_parser_register(
       opp, "-n_regfile_gating_group", OPT_UINT32, &n_regfile_gating_group,
       "group of lanes that should be read/written together)", "4");
@@ -1692,6 +1698,14 @@ void gpgpu_sim::clear_executed_kernel_info() {
 //m_sid, m_stats->get_ipc(m_sid), kernel, kernel->name().c_str(), cta_num, m_gpu->gpu_sim_cycle, m_gpu->gpu_tot_sim_cycle);
 
 void gpgpu_sim::profile_kernel_stats(unsigned m_sid, double ipc, kernel_info_t *kernel){
+    if (!m_config.get_dynamic_core_scheduling())
+        return;
+
+    // if dynamic scheduling is configured, we don't need to profile the kernel stats
+    if (dynamic_scheduling_configured) {
+      return;
+    }
+
     // for two streams, in the beginning, we will first allocate 40% of cores to two streams in interleaved mode    
     // consider SM pairs:
     // SM0/SM1 will be shared by two streams, sharing L1 cache
@@ -1733,8 +1747,11 @@ void gpgpu_sim::profile_kernel_stats(unsigned m_sid, double ipc, kernel_info_t *
       assert (false);
     }
 
-    //printf("CTA completed on core %u (policy: %s) - IPC: %.4f, kernel: %s stream: %u/%u\n", 
-    //       m_sid, policy_name.c_str(), ipc, kernel_name.c_str(), core_stream_mapping[m_sid], kernel->get_streamID());
+    // get core and then get bypass L1D
+    //shader_core_ctx *core = get_core_by_sid(m_sid);
+    //printf("CTA completed on core %u (policy: %s) - IPC: %.4f, kernel: %s stream: %u/%u, bypassL1D: %d, stream0_bypassL1D: %d, stream1_bypassL1D: %d\n", 
+    //        m_sid, policy_name.c_str(), ipc, kernel_name.c_str(), core_stream_mapping[m_sid], kernel->get_streamID(),
+    //       core->get_bypassL1D(), core->get_stream_bypassL1D(0), core->get_stream_bypassL1D(1));
     //printf("Policy %s stats: total IPC: %.4f, CTA count: %u, avg IPC: %.4f, odd IPC: %.4f, even IPC: %.4f\n",
     //       policy_name.c_str(), stats.total_ipc, stats.cta_count, stats.get_average_ipc(), stats.odd_ipc, stats.even_ipc);
 
@@ -1744,63 +1761,114 @@ void gpgpu_sim::profile_kernel_stats(unsigned m_sid, double ipc, kernel_info_t *
 
 void gpgpu_sim::dynamic_core_scheduling() {
 
-  bool notready_to_schedule = false;
-  for (auto& pair : policy_performance_stats) {
-    const PolicyStats& stats = pair.second;
-    if (stats.get_min_cta_count() < 2) {
-      notready_to_schedule = true;
-    }
-  }
-
-  if (notready_to_schedule) {
-    return;
-  }
-
   if (dynamic_scheduling_configured) {
     return;
   }
 
+  // if absolute cycle is longer than 100000
+  // we can start dynamic core scheduling
+  bool isWarmup = gpu_core_abs_cycle > 500000;
+
+  //print_policy_comparison();
+
+  // wait for 5 policies to be collected
+  if (policy_performance_stats.size() != 6)
+    return;
+
+  profile_sample_count++;
+  if (profile_sample_count < 1000 && !isWarmup) {
+    return;
+  }
+
+  bool notready_to_schedule = false;
+  for (auto& pair : policy_performance_stats) {
+    const PolicyStats& stats = pair.second;
+    if (stats.get_min_cta_count() < 1000) {
+      notready_to_schedule = true;
+    }
+  }
+
+  if (notready_to_schedule && !isWarmup) {
+    return;
+  }
+
+
   dynamic_scheduling_configured = true;
 
+  // merge exclusive_stream0 and exclusive_stream1 into exclusive
+  PolicyStats exclusive_stats;
+  exclusive_stats.policy_name = "exclusive";
+  exclusive_stats.even_ipc = (policy_performance_stats["exclusive_stream0"].even_ipc + policy_performance_stats["exclusive_stream0"].odd_ipc)/2;
+  exclusive_stats.even_cta_count = (policy_performance_stats["exclusive_stream0"].even_cta_count + policy_performance_stats["exclusive_stream0"].odd_cta_count)/2;
+  exclusive_stats.odd_ipc = (policy_performance_stats["exclusive_stream1"].odd_ipc + policy_performance_stats["exclusive_stream1"].even_ipc)/2;
+  exclusive_stats.odd_cta_count = (policy_performance_stats["exclusive_stream1"].odd_cta_count + policy_performance_stats["exclusive_stream1"].even_cta_count)/2;
+  exclusive_stats.total_ipc = policy_performance_stats["exclusive_stream0"].total_ipc + policy_performance_stats["exclusive_stream1"].total_ipc;
+  exclusive_stats.cta_count = (policy_performance_stats["exclusive_stream0"].cta_count + policy_performance_stats["exclusive_stream1"].cta_count)/2;
+  policy_performance_stats["exclusive"] = exclusive_stats;
+
   print_policy_comparison();
+
+  // get core and print out the ipc from stats and inst count
+  for (unsigned core_id = 0; core_id < m_config.num_shader(); core_id++) {
+    shader_core_ctx *core = get_core_by_sid(core_id);
+    if (core) {
+      core->print_core_stats();
+    }
+  }
+
+
 
   // choose the best policy based on performance metrics
   std::string best_policy = "";
   double best_score = 0.0;
 
-  // we can create a new policy here, that is bypass bypass, by geting the ipc of even core from bypass_share
-  // and odd core from shared_l1_cache then compare the ipc of the two
-  double stream0_bypass_ipc = 0.0;
-  unsigned stream0_bypass_cta_count = 0;
-  double stream1_bypass_ipc = 0.0;
-  unsigned stream1_bypass_cta_count = 0;
-
-  for (auto& pair : policy_performance_stats) {
-    const PolicyStats& stats = pair.second;
-    if (stats.policy_name == "bypass_share") {
-      stream0_bypass_ipc = stats.even_ipc;
-      stream0_bypass_cta_count = stats.even_cta_count;
-    } else if (stats.policy_name == "share_bypass ") {
-      stream1_bypass_ipc = stats.odd_ipc;
-      stream1_bypass_cta_count = stats.odd_cta_count;
-    }
-  }
-
-  //now we can create a new policy that is bypass bypass and insert it into the policy_performance_stats
-  PolicyStats bypass_bypass_stats;
-  bypass_bypass_stats.policy_name = "bypass_bypass";
-  bypass_bypass_stats.even_ipc = stream0_bypass_ipc;
-  bypass_bypass_stats.even_cta_count = stream0_bypass_cta_count;
-  bypass_bypass_stats.odd_ipc = stream1_bypass_ipc;
-  bypass_bypass_stats.odd_cta_count = stream1_bypass_cta_count;
-  policy_performance_stats["bypass_bypass"] = bypass_bypass_stats;
+  // Calculate baseline IPC values for fairness comparison
+  double exclusive_stream0_ipc = (policy_performance_stats["exclusive_stream0"].even_ipc + policy_performance_stats["exclusive_stream0"].odd_ipc) / 2.0;
+  double exclusive_stream1_ipc = (policy_performance_stats["exclusive_stream1"].even_ipc + policy_performance_stats["exclusive_stream1"].odd_ipc) / 2.0;
   
+  // remove exclusive_stream0 and exclusive_stream1
+  policy_performance_stats.erase("exclusive_stream0");
+  policy_performance_stats.erase("exclusive_stream1");
+
   for (auto& pair : policy_performance_stats) {
     const PolicyStats& stats = pair.second;
     double avg_ipc = stats.get_average_ipc();
-    // lets just compare the ipc of all the policies and choose the one with the highest ipc
-    if (avg_ipc > best_score) {
-      best_score = avg_ipc;
+    
+    // Calculate IPC improvement compared to baseline exclusive policy
+    double ipc_improvement = 0.0;
+    if (stats.policy_name != "exclusive") {
+      // Calculate baseline IPC (average of exclusive_stream0 and exclusive_stream1)
+      double baseline_ipc = (exclusive_stream0_ipc + exclusive_stream1_ipc) / 2.0;
+      ipc_improvement = (avg_ipc - baseline_ipc) / baseline_ipc; // Percentage improvement
+    }
+    
+    // Create fairness-aware metric: IPC + fairness_factor * IPC_improvement
+    // This balances absolute performance with relative improvement
+    double fairness_factor = 0.5; // Weight for improvement consideration
+    //double fairness_score = avg_ipc + fairness_factor * ipc_improvement * avg_ipc;
+    //double fairness_score = stats.even_ipc* stats.even_cta_count + stats.odd_ipc* stats.odd_cta_count;
+    //double fairness_score = stats.even_cta_count + stats.odd_cta_count;
+    double fairness_score = stream_inst_count[0]*stats.even_ipc + stream_inst_count[1]*stats.odd_ipc;
+
+
+    //double inst_ipc = stream_inst_count[0]*stats.even_ipc + stream_inst_count[1]*stats.odd_ipc;
+
+    // Apply policy-specific weights to the fairness score
+    double weighted_score = fairness_score;
+    if (stats.policy_name == "exclusive") {
+      weighted_score = fairness_score * 1;  // 20% boost for exclusive policy
+    } else if (stats.policy_name == "bypass_bypass") {
+      weighted_score = fairness_score * 1;  // 10% boost for bypass_bypass policy
+    } else if (stats.policy_name == "bypass_share" || stats.policy_name == "share_bypass") {
+      weighted_score = fairness_score * 1; // 5% boost for bypass_share and share_bypass policies
+    }
+    
+    printf("Policy %s weighted score: %.4f, even_ipc: %.4f, even_cta_count: %d, odd_ipc: %.4f, odd_cta_count: %d stream inst count: %lld, %lld\n", 
+           stats.policy_name.c_str(), weighted_score, stats.even_ipc, stats.even_cta_count, stats.odd_ipc, stats.odd_cta_count, stream_inst_count[0], stream_inst_count[1]);
+
+    // Choose the policy with the highest weighted fairness score
+    if (weighted_score > best_score) {
+      best_score = weighted_score;
       best_policy = stats.policy_name;
     }
   }
@@ -1816,12 +1884,16 @@ void gpgpu_sim::dynamic_core_scheduling() {
 }
 
 
-void gpgpu_sim::update_core_allocation_for_policy(const std::string& policy) {
+void gpgpu_sim::update_core_allocation_for_policy(const std::string& policy,
+  bool bypass_bypass_stream0_better,
+  bool bypass_bypass_stream1_better) {
   // first reset all core to not bypass L1
   for (unsigned core_id = 0; core_id < m_config.num_shader(); core_id++) {
     shader_core_ctx *core = get_core_by_sid(core_id);
     if (core) {
       core->set_bypassL1D(false);
+      core->set_stream_bypassL1D(0,false);
+      core->set_stream_bypassL1D(1,false);
     }
   }
 
@@ -1840,10 +1912,10 @@ void gpgpu_sim::update_core_allocation_for_policy(const std::string& policy) {
   } else if (policy == "bypass_bypass") {
     printf("Applying bypass bypass policy\n");
     dynamic_scheduling_set_shared_cores(true, true);
-  } else if (policy == "exclusive_stream0" || policy == "exclusive_stream1") {
+  } else if (policy == "exclusive") {
     // Exclusive stream policy: Dedicated cores for each stream
     printf("Applying exclusive stream policy: %s\n", policy.c_str());
-    dynamic_scheduling_exclusive(false, false);
+    dynamic_scheduling_exclusive(bypass_bypass_stream0_better, bypass_bypass_stream1_better);
   } else {
     assert (false);
     // Default policy: No special allocation
@@ -1858,15 +1930,17 @@ std::string gpgpu_sim::determine_policy_for_core(unsigned core_id) {
     // Check if this core is in the dynamic allocation range
     if (core_stream_mapping.find(core_id) != core_stream_mapping.end()) {        
         // Determine policy based on core position
-        if (core_id % 10 == 0 || core_id % 10 == 1) {
+        if (core_id % 12 == 0 || core_id % 12 == 1) {
             return "shared_l1_cache";  // SM0/SM1 - shared L1 cache
-        } else if (core_id % 10 == 2 || core_id % 10 == 3) {
+        } else if (core_id % 12 == 2 || core_id % 12 == 3) {
             return "share_bypass";  // SM2/SM3 - shared with bypass
-        } else if (core_id % 10 == 4 || core_id % 10 == 5) {
-            return "bypass_share";  // SM4/SM5 - shared with bypass
-        } else if (core_id % 10 == 6 || core_id % 10 == 7) {
+        } else if (core_id % 12 == 4 || core_id % 12 == 5) {
+            return "bypass_share";  // SM4/SM5 - bypass with share
+        } else if (core_id % 12 == 6 || core_id % 12 == 7) {
+          return "bypass_bypass";   // SM6/SM7 - bypass bypass
+        } else if (core_id % 12 == 8 || core_id % 12 == 9) {
             return "exclusive_stream0";
-        } else if (core_id % 10 == 8 || core_id % 10 == 9) {
+        } else if (core_id % 12 == 10 || core_id % 12 == 11) {
             return "exclusive_stream1";
         }
     }
@@ -1876,38 +1950,107 @@ std::string gpgpu_sim::determine_policy_for_core(unsigned core_id) {
 }
 
 void gpgpu_sim::print_policy_comparison() {
-    printf("\n=== POLICY PERFORMANCE COMPARISON ===\n");
-    printf("%-20s %-12s %-12s %-12s\n", "Policy", "Total IPC", "CTA Count", "Avg IPC");
-    printf("------------------------------------------------\n");
+    // Calculate baseline IPC values for fairness comparison
+    double exclusive_stream0_ipc = (policy_performance_stats["exclusive_stream0"].even_ipc + policy_performance_stats["exclusive_stream0"].odd_ipc) / 2.0;
+    double exclusive_stream1_ipc = (policy_performance_stats["exclusive_stream1"].even_ipc + policy_performance_stats["exclusive_stream1"].odd_ipc) / 2.0;
+
+    long long exclusive_stream0_cta_count = (policy_performance_stats["exclusive_stream0"].even_cta_count + policy_performance_stats["exclusive_stream0"].odd_cta_count) / 2;
+    long long exclusive_stream1_cta_count = (policy_performance_stats["exclusive_stream1"].even_cta_count + policy_performance_stats["exclusive_stream1"].odd_cta_count) / 2;
     
+    // print out odd, even ipc and total ipc
+    printf("\n=== IPC ===\n");
+    printf("%-20s %-12s %-12s %-12s %-12s %-12s %-12s %-12s\n", "Policy", "Even IPC", "Even CTA", "Odd IPC", "Odd CTA", "Avg IPC", "IPC Improvement", "Fairness Score", "Weighted Score");
+    printf("--------------------------------------------------------------------------------\n");
+    for (const auto& pair : policy_performance_stats) {
+        const PolicyStats& stats = pair.second;
+        double avg_ipc = stats.get_average_ipc();
+        
+        // Calculate IPC improvement compared to baseline exclusive policy
+        double ipc_improvement = 0.0;
+        if (stats.policy_name != "exclusive") {
+            ipc_improvement = ((stats.even_ipc/exclusive_stream0_ipc)*exclusive_stream0_cta_count
+                            + (stats.odd_ipc/exclusive_stream1_ipc)*exclusive_stream1_cta_count
+                          - 2.0 * (exclusive_stream0_cta_count + exclusive_stream1_cta_count)) /
+                          (2.0 * (exclusive_stream0_cta_count + exclusive_stream1_cta_count)) * 100.0; // Percentage improvement
+        }
+        
+        // Create fairness-aware metric
+        double fairness_factor = 2;
+        //double fairness_score = avg_ipc + fairness_factor * ipc_improvement * avg_ipc / 100.0;
+        double fairness_score = stats.even_ipc* stats.even_cta_count + stats.odd_ipc* stats.odd_cta_count;
+        
+        double weighted_score = fairness_score;
+        if (stats.policy_name == "exclusive") {
+            weighted_score = fairness_score * 1;
+        } else if (stats.policy_name == "bypass_bypass") {
+            weighted_score = fairness_score * 1;
+        } else if (stats.policy_name == "bypass_share" || stats.policy_name == "share_bypass") {
+            weighted_score = fairness_score * 1;
+        }
+        printf("%-20s %-12.4f %-12d %-12.4f %-12d %-12.4f %-12.2f %-12.4f %-12.4f\n",
+               stats.policy_name.c_str(),
+               stats.even_ipc,
+               stats.even_cta_count,
+               stats.odd_ipc,
+               stats.odd_cta_count,
+               avg_ipc,
+               ipc_improvement,
+               fairness_score,
+               weighted_score);
+    }
+
+    // print out the best policy
+    printf("\n=== BEST POLICY ===\n");
     std::string best_policy = "";
-    double best_avg_ipc = 0.0;
+    double best_weighted_score = 0.0;
     
     for (const auto& pair : policy_performance_stats) {
         const PolicyStats& stats = pair.second;
-        printf("%-20s %-12.4f %-12u %-12.4f\n", 
-               stats.policy_name.c_str(), 
-               stats.total_ipc, 
-               stats.cta_count, 
-               stats.get_average_ipc());
+        double avg_ipc = stats.get_average_ipc();
         
-        if (stats.get_average_ipc() > best_avg_ipc) {
-            best_avg_ipc = stats.get_average_ipc();
+        // Calculate IPC improvement compared to baseline exclusive policy
+        double ipc_improvement = 0.0;
+        if (stats.policy_name != "exclusive") {
+          ipc_improvement = ((stats.even_ipc/exclusive_stream0_ipc)*exclusive_stream0_cta_count
+                          + (stats.odd_ipc/exclusive_stream1_ipc)*exclusive_stream1_cta_count
+                        - 2.0 * (exclusive_stream0_cta_count + exclusive_stream1_cta_count)) /
+                        (2.0 * (exclusive_stream0_cta_count + exclusive_stream1_cta_count)) * 100.0; // Percentage improvement
+        }
+        
+        // Create fairness-aware metric: IPC + fairness_factor * IPC_improvement
+        double fairness_factor = 2; // Weight for improvement consideration
+        //double fairness_score = avg_ipc + fairness_factor * ipc_improvement * avg_ipc;
+        double fairness_score = stats.even_ipc* stats.even_cta_count + stats.odd_ipc* stats.odd_cta_count;
+        
+        // Apply policy-specific weights to the fairness score
+        double weighted_score = fairness_score;
+        if (stats.policy_name == "exclusive") {
+            weighted_score = fairness_score * 1;  // 20% boost for exclusive policy
+        } else if (stats.policy_name == "bypass_bypass") {
+            weighted_score = fairness_score * 1;  // 10% boost for bypass_bypass policy
+        } else if (stats.policy_name == "bypass_share" || stats.policy_name == "share_bypass") {
+            weighted_score = fairness_score * 1; // 5% boost for bypass_share and share_bypass policies
+        }
+        
+        if (weighted_score > best_weighted_score) {
+            best_weighted_score = weighted_score;
             best_policy = stats.policy_name;
         }
     }
     
-    printf("\n=== OPTIMAL POLICY RECOMMENDATION ===\n");
-    printf("Best performing policy: %s (Avg IPC: %.4f)\n", 
-           best_policy.c_str(), best_avg_ipc);
+    printf("\n=== WEIGHTED FAIRNESS POLICY RECOMMENDATION ===\n");
+    printf("Best weighted policy: %s (Weighted Fairness Score: %.4f)\n", 
+           best_policy.c_str(), best_weighted_score);
     
     // Provide recommendations based on results
     printf("\n=== POLICY RECOMMENDATIONS ===\n");
     if (best_policy == "shared_l1_cache") {
         printf("Recommendation: Use shared L1 cache policy for better performance\n");
-    } else if (best_policy == "shared_bypass_l1") {
-        printf("Recommendation: Use shared with L1 bypass policy for better performance\n");
-    } else if (best_policy == "exclusive_stream0" || best_policy == "exclusive_stream1") {
+    } else if (best_policy == "share_bypass" || best_policy == "bypass_share") {
+        printf("Recommendation: Use shared with bypass policy for better performance\n");
+    } else if (best_policy == "bypass_bypass") {
+        printf("Recommendation: Use bypass bypass policy for better performance\n");
+    } else if (best_policy == "exclusive") {
         printf("Recommendation: Use exclusive stream allocation for better performance\n");
     } else {
         printf("Recommendation: Default allocation performs best\n");
@@ -1925,6 +2068,8 @@ void gpgpu_sim::dynamic_scheduling_set_shared_cores(
 
   unsigned total_cores = get_config().num_shader();
 
+  core_stream_mapping.clear();
+
   for (unsigned i = 0; i < stream_list.size(); i++) {
     std::set<unsigned> core_range;
     unsigned long long stream_id = stream_list[i];
@@ -1932,22 +2077,29 @@ void gpgpu_sim::dynamic_scheduling_set_shared_cores(
     unsigned end_core = stream_id == 0 ? total_cores -2 : total_cores -1;
     for (unsigned core = start_core; core <= end_core; core+=2) {
       core_range.insert(core);
+      core_stream_mapping[core] = stream_id;
     }
     global_dynamic_core_ranges[stream_id] = core_range;
     std::cout << "GLOBAL: STREAM " << stream_id << " -> cores [" << start_core << "-" << end_core << "]" << std::endl;
   }
 
-  if (is_stream0_bypass) {
-    for (unsigned core_id = 0; core_id < total_cores; core_id+=2) {
-      shader_core_ctx *core = get_core_by_sid(core_id);
-      core->set_bypassL1D(true);
+
+  for (unsigned core_id = 0; core_id < total_cores; core_id+=1) {
+    shader_core_ctx *core = get_core_by_sid(core_id);
+    if (is_stream0_bypass && core_stream_mapping[core_id] == 0) {
+      core->set_stream_bypassL1D(0,true);
     }
-  } else if (is_stream1_bypass) {
-    for (unsigned core_id = 1; core_id < total_cores; core_id+=2) {
-      shader_core_ctx *core = get_core_by_sid(core_id);
-      core->set_bypassL1D(true);
+    if (is_stream1_bypass && core_stream_mapping[core_id] == 1) {
+      core->set_stream_bypassL1D(1,true);
     }
   }
+
+  // print out bypass L1D information
+  // for (unsigned core_id = 0; core_id < total_cores; core_id+=1) {
+  //   shader_core_ctx *core = get_core_by_sid(core_id);
+  //   printf("CORE %u: bypassL1D = %d, stream0_bypassL1D = %d, stream1_bypassL1D = %d\n",
+  //         core_id, core->get_bypassL1D(), core->get_stream_bypassL1D(0), core->get_stream_bypassL1D(1));
+  // }
 }
 
 void gpgpu_sim::dynamic_scheduling_exclusive(
@@ -1961,9 +2113,11 @@ void gpgpu_sim::dynamic_scheduling_exclusive(
 
   unsigned total_cores = get_config().num_shader();
 
+
+  core_stream_mapping.clear();
+
   // stream 0 use half of the cores
   // stream 1 use the other half
-
   for (unsigned i = 0; i < stream_list.size(); i++) {
     std::set<unsigned> core_range;
     unsigned long long stream_id = stream_list[i];
@@ -1971,11 +2125,34 @@ void gpgpu_sim::dynamic_scheduling_exclusive(
     unsigned end_core = stream_id == 0 ? total_cores/2 -1 : total_cores -1;
     for (unsigned core = start_core; core <= end_core; core++) {
       core_range.insert(core);
+      core_stream_mapping[core] = stream_id;
     }
     global_dynamic_core_ranges[stream_id] = core_range;
     std::cout << "GLOBAL: STREAM " << stream_id << " -> cores [" << start_core << "-" << end_core << "]" << std::endl;
   }
 
+  // set bypass L1D for each core
+  for (unsigned i = 0; i < stream_list.size(); i++) {
+    unsigned long long stream_id = stream_list[i];
+    unsigned start_core = stream_id == 0 ? 0 : total_cores/2;
+    unsigned end_core = stream_id == 0 ? total_cores/2 -1 : total_cores -1;
+    for (unsigned coreId = start_core; coreId <= end_core; coreId++) {
+      shader_core_ctx *core = get_core_by_sid(coreId);
+      if (is_stream0_bypass && stream_id == 0) {
+        core->set_stream_bypassL1D(0,true);
+      }
+      if (is_stream1_bypass && stream_id == 1) {
+        core->set_stream_bypassL1D(1,true);
+      }
+    }
+  }
+
+  // print out bypass L1D information
+  // for (unsigned core_id = 0; core_id < total_cores; core_id+=1) {
+  //   shader_core_ctx *core = get_core_by_sid(core_id);
+  //   printf("CORE %u: bypassL1D = %d, stream0_bypassL1D = %d, stream1_bypassL1D = %d\n",
+  //         core_id, core->get_bypassL1D(), core->get_stream_bypassL1D(0), core->get_stream_bypassL1D(1));
+  // }
 }
 
 
@@ -2374,6 +2551,12 @@ void shader_core_ctx::issue_block2core(kernel_info_t &kernel) {
   */
 
   kernel.inc_running();
+
+  if (m_stats->shader_start_cycle[m_sid] == 0) {
+    m_stats->shader_start_cycle[m_sid] = m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle;
+    m_stats->shader_current_cycle[m_sid] = m_stats->shader_start_cycle[m_sid];
+    m_stats->m_num_sim_curr_kernel_insn[m_sid] = 0;
+  }
 
   // find a free CTA context
   unsigned free_cta_hw_id = (unsigned)-1;

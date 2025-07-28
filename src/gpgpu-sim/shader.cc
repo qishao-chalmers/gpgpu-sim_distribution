@@ -621,12 +621,19 @@ void shader_core_stats::print(FILE *fout) const {
   unsigned long long thread_icount_uarch = 0;
   unsigned long long warp_icount_uarch = 0;
 
+  double total_ipc = 0;
+  double total_ipc_curr_kernel = 0;
   // print out the ipc of each core
   for (unsigned i = 0; i < m_config->num_shader(); i++) {
     if (shader_cycles[i] > 0 && m_num_sim_insn[i] > 0) {
       fprintf(fout, "core %d ipc = %.4lf\n", i, (double)m_num_sim_insn[i] / (double)shader_cycles[i]);
+      total_ipc += (double)m_num_sim_insn[i] / (double)shader_cycles[i];
+      total_ipc_curr_kernel += (double)m_num_sim_curr_kernel_insn[i] / (double)(shader_current_cycle[i] - shader_start_cycle[i]);
     }
   }
+
+  fprintf(fout, "total_ipc = %.4lf\n", total_ipc);
+  fprintf(fout, "total_ipc_curr_kernel = %.4lf\n", total_ipc_curr_kernel);
 
   for (unsigned i = 0; i < m_config->num_shader(); i++) {
     thread_icount_uarch += m_num_sim_insn[i];
@@ -1944,10 +1951,28 @@ void shader_core_ctx::warp_inst_complete(const warp_inst_t &inst) {
   else if (inst.op_pipe == MEM__OP)
     m_stats->m_num_mem_committed[m_sid]++;
 
-  if (m_config->gpgpu_clock_gated_lanes == false)
+  if (m_config->gpgpu_clock_gated_lanes == false) {
     m_stats->m_num_sim_insn[m_sid] += m_config->warp_size;
-  else
+    m_stats->m_num_sim_curr_kernel_insn[m_sid] += m_config->warp_size;
+  } else {
     m_stats->m_num_sim_insn[m_sid] += inst.active_count();
+    m_stats->m_num_sim_curr_kernel_insn[m_sid] += inst.active_count();
+  }
+
+  m_stats->shader_current_cycle[m_sid] = m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle;
+
+  m_num_sim_10k_inst_tmp = m_stats->m_num_sim_insn[m_sid] / m_config->profile_ipc_instnum_threshold;
+
+  if (m_num_sim_10k_inst_tmp > m_num_sim_10K_insn) {
+    m_num_sim_10K_insn = m_num_sim_10k_inst_tmp;
+    m_gpu->profile_kernel_stats(m_sid, m_stats->get_ipc(m_sid), get_kernel_info());
+    // temp debug print kernel name core id stream id and ipc
+    //printf("[warp_inst_complete] kernel=%s core=%u stream=%u ipc=%f\n",
+    //       get_kernel_info()->name().c_str(), m_sid, core_stream_mapping[m_sid], m_stats->get_ipc(m_sid));
+    // increase every 10k instructions
+    stream_inst_count[core_stream_mapping[m_sid]] += m_stats->m_num_sim_insn[m_sid];
+  }
+
 
   m_stats->m_num_sim_winsn[m_sid]++;
   m_gpu->gpu_sim_insn += inst.active_count();
@@ -1955,7 +1980,12 @@ void shader_core_ctx::warp_inst_complete(const warp_inst_t &inst) {
 
   // temp debug
   //printf("[warp_inst_complete] uid=%u core=%u warp=%u pc=%#x @ time=%llu \n",
-    //inst.get_uid(), m_sid, inst.warp_id(), inst.pc,  m_gpu->gpu_tot_sim_cycle +  m_gpu->gpu_sim_cycle);
+  //inst.get_uid(), m_sid, inst.warp_id(), inst.pc,  m_gpu->gpu_tot_sim_cycle +  m_gpu->gpu_sim_cycle);
+}
+
+void shader_core_ctx::print_core_stats() {
+  printf("Core %u ipc: %.4f, inst count: %lld stream Id: %d\n",
+    m_sid, m_stats->get_ipc(m_sid), m_stats->m_num_sim_insn[m_sid], core_stream_mapping[m_sid]);
 }
 
 void shader_core_ctx::writeback() {
@@ -2340,11 +2370,13 @@ bool ldst_unit::memory_cycle(warp_inst_t &inst,
     if (m_core->get_config()->gmem_skip_L1D && (CACHE_L1 != inst.cache_op))
       bypassL1D = true;
     // if inst is from stream 1, skip L1 cache if the option is enabled
-    else if (m_core->get_config()->gmem_skip_L1D_stream0 && (inst.get_streamID() == 0)
+    else if ((m_core->get_config()->gmem_skip_L1D_stream0 || m_core->get_stream_bypassL1D(0))
+     && (inst.get_streamID() == 0)
       && (CACHE_L1 != inst.cache_op))
       bypassL1D = true;
     // if inst is from stream 0, skip L1 cache if the option is enabled
-    else if (m_core->get_config()->gmem_skip_L1D_stream1 && (inst.get_streamID() == 1)
+    else if ((m_core->get_config()->gmem_skip_L1D_stream1 || m_core->get_stream_bypassL1D(1))
+      && (inst.get_streamID() == 1)
       && (CACHE_L1 != inst.cache_op))
       bypassL1D = true;
     // only support at most 2 streams
@@ -2367,6 +2399,7 @@ bool ldst_unit::memory_cycle(warp_inst_t &inst,
                (m_icnt->full(size, inst.is_store() || inst.isatomic()))) {
       stall_cond = ICNT_RC_FAIL;
     } else {
+      inst.set_bypassL1D(true);
       mem_fetch *mf =
           m_mf_allocator->alloc(inst, access,
                                 m_core->get_gpu()->gpu_sim_cycle +
@@ -2968,16 +3001,20 @@ void ldst_unit::cycle() {
         bool bypassL1D = false;
         if (CACHE_GLOBAL == mf->get_inst().cache_op || (m_L1D == NULL)) {
           bypassL1D = true;
+        //} else if (mf->get_inst().get_bypassL1D()){
+        //  bypassL1D = true;
         } else if (mf->get_access_type() == GLOBAL_ACC_R ||
                    mf->get_access_type() ==
                        GLOBAL_ACC_W) {  // global memory access
           if (m_core->get_config()->gmem_skip_L1D) bypassL1D = true;
-          else if (m_core->get_config()->gmem_skip_L1D_stream0 && (mf->get_streamID() == 0)
-          && (CACHE_L1 != mf->get_inst().cache_op))
+          //else if ((m_core->get_config()->gmem_skip_L1D_stream0 || m_core->get_stream_bypassL1D(0))
+          else if ((m_core->get_config()->gmem_skip_L1D_stream0 || mf->get_bypassL1D())
+                && (mf->get_streamID() == 0) && (CACHE_L1 != mf->get_inst().cache_op))
           bypassL1D = true;
           // if inst is from stream 0, skip L1 cache if the option is enabled
-          else if (m_core->get_config()->gmem_skip_L1D_stream1 && (mf->get_streamID() == 1)
-          && (CACHE_L1 != mf->get_inst().cache_op))
+          //else if ((m_core->get_config()->gmem_skip_L1D_stream1 || m_core->get_stream_bypassL1D(1))
+          else if ((m_core->get_config()->gmem_skip_L1D_stream1 || mf->get_bypassL1D())
+                && (mf->get_streamID() == 1) && (CACHE_L1 != mf->get_inst().cache_op))
           bypassL1D = true;
         }
         if (bypassL1D) {
@@ -3091,11 +3128,13 @@ void shader_core_ctx::register_cta_thread_exit(unsigned cta_num,
     m_barriers.deallocate_barrier(cta_num);
     shader_CTA_count_unlog(m_sid, 1);
 
+
+    //m_gpu->print_policy_comparison();
     // print out the ipc from stats and the kernel name
     //if (m_stats->m_num_sim_insn[m_sid] > 0) {
-    //  fprintf(stdout, "core %d ipc = %.4lf, kernel %p name %s, cta %u, cycle %llu, tot_cycle %llu\n",
-    //  m_sid, m_stats->get_ipc(m_sid), kernel, kernel->name().c_str(), cta_num, m_gpu->gpu_sim_cycle, m_gpu->gpu_tot_sim_cycle);
-    //  m_gpu->profile_kernel_stats(m_sid, m_stats->get_ipc(m_sid), kernel);
+      //fprintf(stdout, "core %d ipc = %.4lf, kernel %p name %s, cta %u, cycle %llu, tot_cycle %llu\n",
+      //m_sid, m_stats->get_ipc(m_sid), kernel, kernel->name().c_str(), cta_num, m_gpu->gpu_sim_cycle, m_gpu->gpu_tot_sim_cycle);
+      //m_gpu->profile_kernel_stats(m_sid, m_stats->get_ipc(m_sid), kernel);
     //}
 
     SHADER_DPRINTF(
@@ -4740,9 +4779,9 @@ unsigned simt_core_cluster::issue_block2core() {
         if (m_core[core]->get_not_completed() == 0) {
           kernel_info_t *k = m_gpu->select_kernel(m_core[core]->get_sid());
           if (k) {
-            printf("Selecting kernel %s streamId %d for core %u sid %d\n",
-                 k ? k->name().c_str() : "NULL", k->get_streamID(), core,
-                 m_core[core]->get_sid());
+            //printf("Selecting kernel %s streamId %lld for core %u sid %d\n",
+            //    k ? k->name().c_str() : "NULL", k->get_streamID(), core,
+            //    m_core[core]->get_sid());
             m_core[core]->set_kernel(k);
           }
           kernel = k;

@@ -1639,6 +1639,8 @@ class shader_core_config : public core_config {
   char *pipeline_widths_string;
   int pipe_widths[N_PIPELINE_STAGES];
 
+  unsigned profile_ipc_instnum_threshold;
+
   mutable cache_config m_L1I_config;
   mutable cache_config m_L1T_config;
   mutable cache_config m_L1C_config;
@@ -1736,8 +1738,11 @@ struct shader_core_stats_pod {
       shader_core_stats_pod_start[0];  // DO NOT MOVE FROM THE TOP - spaceless
                                        // pointer to the start of this structure
   unsigned long long *shader_cycles;
+  unsigned long long *shader_start_cycle;
+  unsigned long long *shader_current_cycle;
   unsigned *m_num_sim_insn;   // number of scalar thread instructions committed
                               // by this shader core
+  unsigned *m_num_sim_curr_kernel_insn;  // number of scalar thread instructions committed by this shader core
   unsigned *m_num_sim_winsn;  // number of warp instructions committed by this
                               // shader core
   unsigned *m_last_num_sim_insn;
@@ -1840,7 +1845,15 @@ class shader_core_stats : public shader_core_stats_pod {
     memset(pod, 0, sizeof(shader_core_stats_pod));
     shader_cycles = (unsigned long long *)calloc(config->num_shader(),
                                                  sizeof(unsigned long long));
+    shader_start_cycle = (unsigned long long *)calloc(config->num_shader(),
+                                                 sizeof(unsigned long long));
+    memset(shader_start_cycle, 0, config->num_shader() * sizeof(unsigned long long));
+    shader_current_cycle = (unsigned long long *)calloc(config->num_shader(),
+                                                 sizeof(unsigned long long));
+    memset(shader_current_cycle, 0, config->num_shader() * sizeof(unsigned long long));
     m_num_sim_insn = (unsigned *)calloc(config->num_shader(), sizeof(unsigned));
+    m_num_sim_curr_kernel_insn = (unsigned *)calloc(config->num_shader(), sizeof(unsigned));
+    memset(m_num_sim_curr_kernel_insn, 0, config->num_shader() * sizeof(unsigned));
     m_num_sim_winsn =
         (unsigned *)calloc(config->num_shader(), sizeof(unsigned));
     m_last_num_sim_winsn =
@@ -2005,7 +2018,12 @@ class shader_core_stats : public shader_core_stats_pod {
   void print(FILE *fout) const;
 
   double get_ipc(unsigned core_id) const {
-    return double(m_num_sim_insn[core_id]) / double(shader_cycles[core_id]);
+    if (shader_current_cycle[core_id] == shader_start_cycle[core_id]) {
+      return 0;
+    } else {
+      return double(m_num_sim_insn[core_id]) /
+      double(shader_current_cycle[core_id] - shader_start_cycle[core_id]);    
+    }
   }
 
   const std::vector<std::vector<unsigned>> &get_dynamic_warp_issue() const {
@@ -2125,11 +2143,22 @@ class shader_core_ctx : public core_t {
   void broadcast_barrier_reduction(unsigned cta_id, unsigned bar_id,
                                    warp_set_t warps);
   void set_kernel(kernel_info_t *k) {
+    // only enable the bypass L1D when the kernel is launched
+    // so we didnt change the core config during the kernel execution
+    gmem_skip_L1D_stream0 = gmem_skip_L1D_stream0_en;
+    gmem_skip_L1D_stream1 = gmem_skip_L1D_stream1_en;
+
+    bool isBypass = k != NULL ?
+                    k->get_streamID() == 0 ?
+                    gmem_skip_L1D_stream0_en :
+                    gmem_skip_L1D_stream1_en :
+                    false;
+    
     assert(k);
     m_kernel = k;
     //        k->inc_running();
-    printf("GPGPU-Sim uArch: Shader %d shader ID %d bind to kernel %u \'%s\'\n", m_sid,
-           m_kernel->get_uid(), m_sid, m_kernel->name().c_str());
+    printf("GPGPU-Sim uArch: Shader %d shader ID %d bind to kernel %u \'%s\' %s\n", m_sid,
+           m_kernel->get_uid(), m_sid, m_kernel->name().c_str(), isBypass ? "bypass cache" : " use cache");
   }
   PowerscalingCoefficients *scaling_coeffs;
   // accessors
@@ -2172,6 +2201,7 @@ class shader_core_ctx : public core_t {
   bool warp_waiting_at_mem_barrier(unsigned warp_id);
   void set_max_cta(const kernel_info_t &kernel);
   void warp_inst_complete(const warp_inst_t &inst);
+  void print_core_stats();
 
   // accessors
   std::list<unsigned> get_regs_written(const inst_t &fvt) const;
@@ -2615,6 +2645,11 @@ class shader_core_ctx : public core_t {
   // run on this shader, where the warp_id is the static warp slot.
   unsigned m_dynamic_warp_id;
 
+
+  long long m_num_sim_10K_insn;
+ 
+  long long m_num_sim_10k_inst_tmp;
+
   // Jin: concurrent kernels on a sm
  public:
   bool can_issue_1block(kernel_info_t &kernel);
@@ -2629,6 +2664,25 @@ class shader_core_ctx : public core_t {
     return bypassL1D;
   }
 
+  void set_stream_bypassL1D(unsigned stream_id, bool bypass) {
+    if (stream_id == 0) {
+      gmem_skip_L1D_stream0_en = bypass;
+    } else if (stream_id == 1) {
+      gmem_skip_L1D_stream1_en = bypass;
+    } else {
+      assert(false && "Invalid stream id");
+    }
+  }
+  bool get_stream_bypassL1D(unsigned stream_id) const {
+    if (stream_id == 0) {
+      return gmem_skip_L1D_stream0_en;
+    } else if (stream_id == 1) {
+      return gmem_skip_L1D_stream1_en;
+    } else {
+      assert(false && "Invalid stream id");
+    }
+  }
+
  private:
   unsigned int m_occupied_n_threads;
   unsigned int m_occupied_shmem;
@@ -2637,6 +2691,11 @@ class shader_core_ctx : public core_t {
   std::bitset<MAX_THREAD_PER_SM> m_occupied_hwtid;
   std::map<unsigned int, unsigned int> m_occupied_cta_to_hwtid;
   bool bypassL1D = false;
+  bool gmem_skip_L1D_stream0_en = false;
+  bool gmem_skip_L1D_stream1_en = false;
+
+  bool gmem_skip_L1D_stream0 = false;
+  bool gmem_skip_L1D_stream1 = false;
 };
 
 class exec_shader_core_ctx : public shader_core_ctx {

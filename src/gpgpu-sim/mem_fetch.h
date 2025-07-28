@@ -163,6 +163,9 @@ class mem_fetch {
   void set_is_prefetch(bool is_prefetch) { this->is_prefetch = is_prefetch; }
   bool get_is_prefetch() const { return is_prefetch; }
 
+  void set_bypassL1D(bool is_bypassL1D) { this->is_bypassL1D = is_bypassL1D; }
+  bool get_bypassL1D() const { return is_bypassL1D; }
+
  private:
   bool dynamic_fetch_mode = false;
   // request source information
@@ -172,6 +175,8 @@ class mem_fetch {
   unsigned m_wid;
 
   bool is_prefetch = false;
+
+  bool is_bypassL1D = false;
 
   // where is this request now?
   enum mem_fetch_status m_status;
