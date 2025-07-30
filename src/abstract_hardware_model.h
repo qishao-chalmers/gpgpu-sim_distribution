@@ -1162,6 +1162,7 @@ class warp_inst_t : public inst_t {
     m_uid = 0;
     m_streamID = (unsigned long long)-1;
     m_bypassL1D = false;
+    m_issued = false;
     m_empty = true;
     m_config = NULL;
 
@@ -1177,6 +1178,7 @@ class warp_inst_t : public inst_t {
     m_uid = 0;
     m_streamID = (unsigned long long)-1;
     m_bypassL1D = false;
+    m_issued = false;
     assert(config->warp_size <= MAX_WARP_SIZE);
     m_config = config;
     m_empty = true;
@@ -1360,7 +1362,10 @@ class warp_inst_t : public inst_t {
   bool accessq_empty() const { return m_accessq.empty(); }
   unsigned accessq_count() const { return m_accessq.size(); }
   const mem_access_t &accessq_back() { return m_accessq.back(); }
-  void accessq_pop_back() { m_accessq.pop_back(); }
+  void accessq_pop_back() {
+    m_accessq.pop_back();
+    m_issued = true;
+  }
 
   bool dispatch_delay() {
     if (cycles > 0) cycles--;
@@ -1376,12 +1381,17 @@ class warp_inst_t : public inst_t {
 
   bool get_bypassL1D() const { return m_bypassL1D; }
   void set_bypassL1D(bool bypass) { m_bypassL1D = bypass; }
+
+  bool isIssued() const { return m_issued; }
+  void set_issued(bool issued) { m_issued = issued; }
+
   active_mask_t get_warp_active_mask() const { return m_warp_active_mask; }
 
  protected:
   unsigned m_uid;
   unsigned long long m_streamID;
   bool m_bypassL1D;
+  bool m_issued;
   bool m_empty;
   bool m_cache_hit;
   unsigned long long issue_cycle;

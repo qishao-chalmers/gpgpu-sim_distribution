@@ -74,6 +74,14 @@ extern std::map<unsigned, unsigned> core_stream_mapping;
 
 extern std::map<unsigned long long, std::set<unsigned>> global_dynamic_core_ranges;
 
+extern std::map<unsigned long long, std::vector<unsigned>> global_dynamic_core_ranges_vector;
+
+extern std::map<unsigned long long, std::set<unsigned>> global_stream_core_ranges_set;
+
+extern std::map<unsigned long long, std::vector<unsigned>> global_stream_core_ranges_vector;
+
+extern std::map<unsigned long long, std::pair<unsigned, unsigned>> global_stream_core_ranges;
+
 extern std::set<unsigned long long> global_unique_streams;
 
 extern std::map<unsigned,long long > stream_inst_count;
@@ -737,6 +745,8 @@ class gpgpu_sim : public gpgpu_t {
 
   void release_core_range_limit();
 
+  void info_transition_done();
+
   void dynamic_scheduling_set_shared_cores(bool is_stream0_bypass = false, bool is_stream1_bypass = false);
   void dynamic_scheduling_exclusive(bool is_stream0_bypass = false, bool is_stream1_bypass = false);
 
@@ -799,10 +809,10 @@ class gpgpu_sim : public gpgpu_t {
    */
   bool is_SST_mode() { return m_config.is_SST_mode(); }
 
-  // Add this line:
   void update_core_allocation_for_policy(const std::string& policy,
                                         bool bypass_bypass_stream0_better = false,
                                         bool bypass_bypass_stream1_better = false);
+  void reset_simulation_state();
 
   // backward pointer
   class gpgpu_context *gpgpu_ctx;
@@ -813,6 +823,7 @@ class gpgpu_sim : public gpgpu_t {
   int next_clock_domain(void);
   void issue_block2core();
   void issue_block2core_stream_partitioning();  // Stream-based core allocation
+  void issue_block2core_by_core_range();
   void print_dram_stats(FILE *fout) const;
   void shader_print_runtime_stat(FILE *fout);
   void shader_print_l1_miss_stat(FILE *fout) const;
@@ -899,6 +910,8 @@ class gpgpu_sim : public gpgpu_t {
   std::map<unsigned, bool> stream_prefer_bypass_l1_cache;
   
   unsigned profile_sample_count = 0;
+
+  long long profile_cycle_threshold = 50000;
  public:
   unsigned long long gpu_sim_insn;
   unsigned long long gpu_tot_sim_insn;
@@ -968,6 +981,8 @@ class gpgpu_sim : public gpgpu_t {
   }
 
   unsigned long long get_first_stream_id() const;  // Helper for stream partitioning
+
+  unsigned get_next_core_id_by_core_range(unsigned stream_id);
 
   void copy_to_gpu();
   void copy_from_gpu();

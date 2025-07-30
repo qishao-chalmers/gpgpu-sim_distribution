@@ -92,7 +92,12 @@ tr1_hash_map<new_addr_type, unsigned> address_random_interleaving;
 std::map<unsigned, unsigned> core_stream_mapping;
 std::map<std::string, PolicyStats> policy_performance_stats;
 std::map<std::string, std::vector<PolicyStats>> policy_performance_stats_vector;
+// the global_stream_core_ranges_set could be merged with global_dynamic_core_ranges
 std::map<unsigned long long, std::set<unsigned>> global_dynamic_core_ranges;
+std::map<unsigned long long, std::vector<unsigned>> global_dynamic_core_ranges_vector;
+std::map<unsigned long long, std::set<unsigned>> global_stream_core_ranges_set;
+std::map<unsigned long long, std::vector<unsigned>> global_stream_core_ranges_vector;
+std::map<unsigned long long, std::pair<unsigned, unsigned>> global_stream_core_ranges;
 std::set<unsigned long long> global_unique_streams;
 std::map<unsigned,long long > stream_inst_count;
 
@@ -715,7 +720,9 @@ void shader_core_config::reg_options(class OptionParser *opp) {
   option_parser_register(
       opp, "-gpgpu_concurrent_kernel_sm", OPT_BOOL, &gpgpu_concurrent_kernel_sm,
       "Support concurrent kernels on a SM (default = disabled)", "0");
-      
+
+  
+  // stream-based partitioning is enabled by default
   option_parser_register(
       opp, "-gpgpu_stream_based_allocation", OPT_BOOL, &gpgpu_stream_partitioning,
       "Enable stream-based core allocation with spatial partitioning (default = enabled)", "1");
@@ -1043,8 +1050,8 @@ kernel_info_t *gpgpu_sim::select_kernel(unsigned core_id) {
   if (m_config.get_dynamic_core_scheduling()) {
     if (kernel) {
       if (kernel->get_streamID() != core_stream_mapping[core_id]) {
-        printf("kernel stream ID %u, core stream ID %u, kernel name %s\n",
-        kernel->get_streamID(), core_stream_mapping[core_id], kernel->name().c_str());
+        //printf("kernel stream ID %u, core stream ID %u, kernel name %s\n",
+        //kernel->get_streamID(), core_stream_mapping[core_id], kernel->name().c_str());
         assert (false);
       }
     }
@@ -1053,7 +1060,9 @@ kernel_info_t *gpgpu_sim::select_kernel(unsigned core_id) {
   return kernel;
 }
 
-kernel_info_t *gpgpu_sim::select_kernel(unsigned core_id, std::vector<kernel_info_t *> &m_running_kernels_stream, unsigned &m_last_issued_kernel_stream) {
+kernel_info_t *gpgpu_sim::select_kernel(unsigned core_id,
+                  std::vector<kernel_info_t *> &m_running_kernels_stream,
+                  unsigned &m_last_issued_kernel_stream) {
   if (m_running_kernels_stream[m_last_issued_kernel_stream] && 
       !m_running_kernels_stream[m_last_issued_kernel_stream]->no_more_ctas_to_run() &&
       !m_running_kernels_stream[m_last_issued_kernel_stream]->m_kernel_TB_latency &&
@@ -1071,8 +1080,8 @@ kernel_info_t *gpgpu_sim::select_kernel(unsigned core_id, std::vector<kernel_inf
       m_executed_kernel_names.push_back(
           m_running_kernels_stream[m_last_issued_kernel_stream]->name());
 
-     //printf("select_kernel core_id %u, stream %u kernel %s\n",
-     //core_id, m_last_issued_kernel_stream, m_running_kernels_stream[m_last_issued_kernel_stream]->name().c_str());
+     printf("select_kernel core_id %u, kernelId %u kernel %s\n",
+     core_id, m_last_issued_kernel_stream, m_running_kernels_stream[m_last_issued_kernel_stream]->name().c_str());
     }
 
     return m_running_kernels_stream[m_last_issued_kernel_stream];
@@ -1086,9 +1095,9 @@ kernel_info_t *gpgpu_sim::select_kernel(unsigned core_id, std::vector<kernel_inf
         !m_running_kernels_stream[idx]->m_kernel_TB_latency) {
       if (!m_running_kernels_stream[idx]->is_in_core_range(core_id)) {
         // If the kernel is not in the core range, skip it
-        //printf("select_kernel skip core_id %u, stream %u kernel %s core range %s\n",
-        //       core_id, idx, m_running_kernels_stream[idx]->name().c_str(),
-        //       m_running_kernels_stream[idx]->print_core_range().c_str());
+        printf("select_kernel skip core_id %u, stream %u kernel %s core range %s\n",
+               core_id, idx, m_running_kernels_stream[idx]->name().c_str(),
+               m_running_kernels_stream[idx]->print_core_range().c_str());
         continue;
       }
 
@@ -1105,8 +1114,8 @@ kernel_info_t *gpgpu_sim::select_kernel(unsigned core_id, std::vector<kernel_inf
       m_executed_kernel_uids.push_back(launch_uid);
       m_executed_kernel_names.push_back(m_running_kernels_stream[idx]->name());
 
-     //printf("select_kernel switch core_id %u, kernelId %u kernel %s\n",
-     //core_id, m_last_issued_kernel_stream, m_running_kernels_stream[idx]->name().c_str());
+      //printf("select_kernel switch core_id %u, kernelId %u kernel %s\n",
+      //core_id, m_last_issued_kernel_stream, m_running_kernels_stream[idx]->name().c_str());
 
       return m_running_kernels_stream[idx];
     }
@@ -1269,8 +1278,17 @@ gpgpu_sim::gpgpu_sim(const gpgpu_sim_config &config, gpgpu_context *ctx)
   m_last_issued_kernel_stream2 = 0;
   
   // Initialize stream-based allocation variables
-  m_last_cluster_issue_stream1 = m_shader_config->n_simt_clusters/2 - 1;
-  m_last_cluster_issue_stream2 = m_shader_config->n_simt_clusters/2 - 1;
+
+  if (m_config.get_dynamic_core_scheduling()) {
+    m_last_cluster_issue_stream1 = m_shader_config->n_simt_clusters;
+    m_last_cluster_issue_stream2 = m_shader_config->n_simt_clusters;
+  } else if (m_config.get_stream_intlv_core()){
+    m_last_cluster_issue_stream1 = m_shader_config->n_simt_clusters-1;
+    m_last_cluster_issue_stream2 = m_shader_config->n_simt_clusters;
+  } else {
+    m_last_cluster_issue_stream1 = m_shader_config->n_simt_clusters/2;
+    m_last_cluster_issue_stream2 = m_shader_config->n_simt_clusters;
+  }
   
   *average_pipeline_duty_cycle = 0;
   *active_sms = 0;
@@ -1281,6 +1299,28 @@ gpgpu_sim::gpgpu_sim(const gpgpu_sim_config &config, gpgpu_context *ctx)
   m_functional_sim = false;
   m_functional_sim_kernel = NULL;
 }
+
+unsigned gpgpu_sim::get_next_core_id_by_core_range(unsigned stream_id) {
+
+  auto& core_range = m_config.get_dynamic_core_scheduling() ?
+  global_dynamic_core_ranges_vector[stream_id] :
+                    global_stream_core_ranges_vector[stream_id];
+
+  unsigned last_stream_id = stream_id == 0 ? m_last_cluster_issue_stream1 : m_last_cluster_issue_stream2;
+
+  if (last_stream_id >= core_range.back()) {
+    return core_range.front();
+  }
+
+  for (auto core_id : core_range) {
+    if (core_id > last_stream_id) {
+      return core_id;
+    }
+  }
+
+  return core_range.front();
+}
+
 
 void sst_gpgpu_sim::SST_receive_mem_reply(unsigned core_id, void *mem_req) {
   assert(core_id < m_shader_config->n_simt_clusters);
@@ -1357,6 +1397,36 @@ void gpgpu_sim::release_core_range_limit() {
     if (m_running_kernels[i] != NULL)
       m_running_kernels[i]->set_core_range(0, get_config().num_shader()-1);
   }
+}
+
+void gpgpu_sim::info_transition_done() {
+  // set all the cores with transition done
+  for (unsigned core_id = 0; core_id < m_config.num_shader(); core_id++) {
+    shader_core_ctx *core = get_core_by_sid(core_id);
+    if (core) {
+      core->transition_done = true;
+      // invalidate all l1 cache
+      //core->cache_flush();
+      //core->cache_invalidate();
+      //printf("GPGPU-Sim uArch: Shader %d transition done, cache flushed\n", core_id);
+    }
+  }
+
+  /*
+  // flush all the l2 cache
+  for (unsigned i = 0; i < m_memory_config->m_n_mem; i++) {
+
+    for (unsigned p = 0;
+      p < m_memory_config->m_n_sub_partition_per_memory_channel; p++) {
+      unsigned submpid =
+          i * m_memory_config->m_n_sub_partition_per_memory_channel + p;
+      unsigned flushed_data = m_memory_sub_partition[submpid]->flushL2();
+      printf("GPGPU-Sim uArch: L2 cache flushed, flushed_data: %d\n", flushed_data);
+      unsigned invalidated_data = m_memory_sub_partition[submpid]->invalidateL2();
+      printf("GPGPU-Sim uArch: L2 cache invalidated, invalidated_data: %d\n", invalidated_data);
+    }
+  }
+  */
 }
 
 void gpgpu_sim_config::init_clock_domains(void) {
@@ -1706,59 +1776,9 @@ void gpgpu_sim::profile_kernel_stats(unsigned m_sid, double ipc, kernel_info_t *
     if (dynamic_scheduling_configured) {
       return;
     }
-
-    /*
-    // for two streams, in the beginning, we will first allocate 40% of cores to two streams in interleaved mode    
-    // consider SM pairs:
-    // SM0/SM1 will be shared by two streams, sharing L1 cache
-    // SM2/SM3 will be shared by two streams, SM2 bypasses L1 cache
-    // SM4/SM5 will be shared by two streams, SM4 bypasses L1 cache
-    // SM6/SM7 will be used by stream 0 exclusively, sharing L1 cache
-    // SM8/SM9 will be used by stream 1 exclusively, sharing L1 cache
-    // stream 0 will be using: 0,2,4,6,7,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40
-    // stream 1 will be using: 1,3,5,8,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41
-
-    std::string kernel_name = kernel->name();
-    // Determine which policy this CTA belongs to based on core ID
-    std::string policy_name = determine_policy_for_core(m_sid);
-    
-    // Update statistics for this policy
-    if (policy_performance_stats.find(policy_name) == policy_performance_stats.end()) {
-        policy_performance_stats[policy_name] = PolicyStats();
-        policy_performance_stats[policy_name].policy_name = policy_name;
-    }
-    
-    PolicyStats& stats = policy_performance_stats[policy_name];
-
-    if (m_sid % 2 == 0) {
-        stats.even_ipc = (stats.even_ipc * stats.even_cta_count + ipc) / (stats.even_cta_count + 1.0);
-        stats.even_cta_count++;
-    } else {
-        stats.odd_ipc = (stats.odd_ipc * stats.odd_cta_count + ipc) / (stats.odd_cta_count + 1.0);
-        stats.odd_cta_count++;
-    }
-    stats.total_ipc += ipc;
-    stats.cta_count++;
-    if (policy_name == "exclusive_stream0" && kernel->get_streamID() != 0) {
-      printf("kernel stream ID %u, core stream ID %u, kernel name %s core ID %u\n",
-      kernel->get_streamID(), core_stream_mapping[m_sid], kernel->name().c_str(), m_sid);
-      assert (false);
-    } else if (policy_name == "exclusive_stream1" && kernel->get_streamID() != 1) {
-      printf("kernel stream ID %u, core stream ID %u, kernel name %s core ID %u\n",
-      kernel->get_streamID(), core_stream_mapping[m_sid], kernel->name().c_str(), m_sid);
-      assert (false);
-    }
-
-    // get core and then get bypass L1D
-    //shader_core_ctx *core = get_core_by_sid(m_sid);
-    //printf("CTA completed on core %u (policy: %s) - IPC: %.4f, kernel: %s stream: %u/%u, bypassL1D: %d, stream0_bypassL1D: %d, stream1_bypassL1D: %d\n", 
-    //        m_sid, policy_name.c_str(), ipc, kernel_name.c_str(), core_stream_mapping[m_sid], kernel->get_streamID(),
-    //       core->get_bypassL1D(), core->get_stream_bypassL1D(0), core->get_stream_bypassL1D(1));
-    //printf("Policy %s stats: total IPC: %.4f, CTA count: %u, avg IPC: %.4f, odd IPC: %.4f, even IPC: %.4f\n",
-    //       policy_name.c_str(), stats.total_ipc, stats.cta_count, stats.get_average_ipc(), stats.odd_ipc, stats.even_ipc);
-    */
-    // dynamic core scheduling
     dynamic_core_scheduling();
+
+    info_transition_done();
 }
 
 void gpgpu_sim::dynamic_core_scheduling() {
@@ -1767,20 +1787,16 @@ void gpgpu_sim::dynamic_core_scheduling() {
     return;
   }
 
-  // if absolute cycle is longer than 100000
   // we can start dynamic core scheduling
-  bool isWarmup = gpu_core_abs_cycle > 500000;
-
-  //bool isWarmup = gpu_core_abs_cycle > 200000;
+  bool isWarmup = gpu_core_abs_cycle > profile_cycle_threshold;
 
   profile_sample_count++;
-  if (profile_sample_count < 2000 && !isWarmup) {
+  if (profile_sample_count < 100 && !isWarmup) {
   //if (profile_sample_count < 500 && !isWarmup) {
     return;
   }
 
   dynamic_scheduling_configured = true;
-
 
   // get core and print out the ipc from stats and inst count
   for (unsigned core_id = 0; core_id < m_config.num_shader(); core_id++) {
@@ -1817,6 +1833,8 @@ void gpgpu_sim::dynamic_core_scheduling() {
     core_stats.even_inst_count = even_inst_count;
     core_stats.odd_inst_count = odd_inst_count;
 
+    assert(policy_name != "");
+
     policy_performance_stats_vector[policy_name].push_back(core_stats);
   }
 
@@ -1838,6 +1856,31 @@ void gpgpu_sim::dynamic_core_scheduling() {
     avg_stats.odd_inst_count /= stats_vector.size();
     policy_performance_stats[policy_name] = avg_stats;
   }
+
+  // check cores for each policy has ipc > 0
+  bool ipc_lt_0 = false;
+  for (auto& pair : policy_performance_stats) {
+    const PolicyStats& stats = pair.second;
+    if (stats.even_ipc > 0 && stats.odd_ipc > 0) {
+      continue;
+    } else {
+      ipc_lt_0 = true;
+      break;
+    }
+  }
+
+  if (ipc_lt_0 || policy_performance_stats.size() != 6) {
+    if (profile_cycle_threshold < 200000) {
+      profile_cycle_threshold = profile_cycle_threshold*1.1;
+    }
+
+    dynamic_scheduling_configured = false;
+
+    policy_performance_stats_vector.clear();
+    policy_performance_stats.clear();
+    return;
+  }
+
 
   // merge exclusive_stream0 and exclusive_stream1 into exclusive
   PolicyStats exclusive_stats;
@@ -1890,8 +1933,8 @@ void gpgpu_sim::dynamic_core_scheduling() {
   
   // Apply the best policy
   if (!best_policy.empty()) {
-    printf("DYNAMIC SCHEDULING: Selected policy '%s' with score %.4f\n", 
-           best_policy.c_str(), best_score);
+    printf("DYNAMIC SCHEDULING: Selected policy '%s' with score %.4f cycle %lld\n", 
+           best_policy.c_str(), best_score, gpu_core_abs_cycle);
     
     // Update core allocations based on the best policy
     update_core_allocation_for_policy(best_policy);
@@ -1915,6 +1958,118 @@ void gpgpu_sim::update_policy_stats(const std::string& policy, PolicyStats& core
 }
 
 
+void gpgpu_sim::print_policy_comparison() {
+  // Calculate baseline IPC values for fairness comparison
+  double exclusive_stream0_ipc = (policy_performance_stats["exclusive_stream0"].even_ipc + policy_performance_stats["exclusive_stream0"].odd_ipc) / 2.0;
+  double exclusive_stream1_ipc = (policy_performance_stats["exclusive_stream1"].even_ipc + policy_performance_stats["exclusive_stream1"].odd_ipc) / 2.0;
+
+  long long exclusive_stream0_inst_count = (policy_performance_stats["exclusive_stream0"].even_inst_count + policy_performance_stats["exclusive_stream0"].odd_inst_count) / 2;
+  long long exclusive_stream1_inst_count = (policy_performance_stats["exclusive_stream1"].even_inst_count + policy_performance_stats["exclusive_stream1"].odd_inst_count) / 2;
+  
+  // print out odd, even ipc and total ipc
+  printf("\n=== IPC ===\n");
+  printf("%-20s %-12s %-12s %-12s %-12s %-12s %-12s %-12s\n", "Policy", "Even IPC", "Even Inst", "Odd IPC", "Odd Inst", "Avg IPC", "IPC Improvement", "Fairness Score", "Weighted Score");
+  printf("--------------------------------------------------------------------------------\n");
+  for (const auto& pair : policy_performance_stats) {
+      const PolicyStats& stats = pair.second;
+      double avg_ipc = stats.get_average_ipc();
+      
+      // Calculate IPC improvement compared to baseline exclusive policy
+      double ipc_improvement = 0.0;
+      if (stats.policy_name != "exclusive") {
+          ipc_improvement = ((stats.even_ipc/exclusive_stream0_ipc)*exclusive_stream0_inst_count
+                          + (stats.odd_ipc/exclusive_stream1_ipc)*exclusive_stream1_inst_count
+                        - 2.0 * (exclusive_stream0_inst_count + exclusive_stream1_inst_count)) /
+                        (2.0 * (exclusive_stream0_inst_count + exclusive_stream1_inst_count)) * 100.0; // Percentage improvement
+      }
+      
+      // Create fairness-aware metric
+      double fairness_factor = 2;
+      //double fairness_score = avg_ipc + fairness_factor * ipc_improvement * avg_ipc / 100.0;
+      double fairness_score = stats.even_inst_count + stats.odd_inst_count;
+      
+      double weighted_score = fairness_score;
+      if (stats.policy_name == "exclusive") {
+          weighted_score = fairness_score * 1;
+      } else if (stats.policy_name == "bypass_bypass") {
+          weighted_score = fairness_score * 1;
+      } else if (stats.policy_name == "bypass_share" || stats.policy_name == "share_bypass") {
+          weighted_score = fairness_score * 1;
+      }
+      printf("%-20s %-12.4f %-12d %-12.4f %-12d %-12.4f %-12.2f %-12.4f %-12.4f\n",
+             stats.policy_name.c_str(),
+             stats.even_ipc,
+             stats.even_inst_count,
+             stats.odd_ipc,
+             stats.odd_inst_count,
+             avg_ipc,
+             ipc_improvement,
+             fairness_score,
+             weighted_score);
+  }
+
+  // print out the best policy
+  printf("\n=== BEST POLICY ===\n");
+  std::string best_policy = "";
+  double best_weighted_score = 0.0;
+  
+  for (const auto& pair : policy_performance_stats) {
+      const PolicyStats& stats = pair.second;
+      double avg_ipc = stats.get_average_ipc();
+      
+      // Calculate IPC improvement compared to baseline exclusive policy
+      double ipc_improvement = 0.0;
+      if (stats.policy_name != "exclusive") {
+        ipc_improvement = ((stats.even_ipc/exclusive_stream0_ipc)*exclusive_stream0_inst_count
+                        + (stats.odd_ipc/exclusive_stream1_ipc)*exclusive_stream1_inst_count
+                      - 2.0 * (exclusive_stream0_inst_count + exclusive_stream1_inst_count)) /
+                      (2.0 * (exclusive_stream0_inst_count + exclusive_stream1_inst_count)) * 100.0; // Percentage improvement
+      }
+      
+      if (stats.policy_name == "exclusive_stream0" || stats.policy_name == "exclusive_stream1") {
+        continue;
+      }
+
+      // Create fairness-aware metric: IPC + fairness_factor * IPC_improvement
+      double fairness_factor = 2; // Weight for improvement consideration
+      //double fairness_score = avg_ipc + fairness_factor * ipc_improvement * avg_ipc;
+      double fairness_score = stats.even_inst_count + stats.odd_inst_count;
+      
+      // Apply policy-specific weights to the fairness score
+      double weighted_score = fairness_score;
+      if (stats.policy_name == "exclusive") {
+          weighted_score = fairness_score * 1;  // 20% boost for exclusive policy
+      } else if (stats.policy_name == "bypass_bypass") {
+          weighted_score = fairness_score * 1;  // 10% boost for bypass_bypass policy
+      } else if (stats.policy_name == "bypass_share" || stats.policy_name == "share_bypass") {
+          weighted_score = fairness_score * 1; // 5% boost for bypass_share and share_bypass policies
+      }
+      
+      if (weighted_score > best_weighted_score) {
+          best_weighted_score = weighted_score;
+          best_policy = stats.policy_name;
+      }
+  }
+  
+  printf("\n=== WEIGHTED FAIRNESS POLICY RECOMMENDATION ===\n");
+  printf("Best weighted policy: %s (Weighted Fairness Score: %.4f)\n", 
+         best_policy.c_str(), best_weighted_score);
+  
+  // Provide recommendations based on results
+  printf("\n=== POLICY RECOMMENDATIONS ===\n");
+  if (best_policy == "shared_l1_cache") {
+      printf("Recommendation: Use shared L1 cache policy for better performance\n");
+  } else if (best_policy == "share_bypass" || best_policy == "bypass_share") {
+      printf("Recommendation: Use shared with bypass policy for better performance\n");
+  } else if (best_policy == "bypass_bypass") {
+      printf("Recommendation: Use bypass bypass policy for better performance\n");
+  } else if (best_policy == "exclusive") {
+      printf("Recommendation: Use exclusive stream allocation for better performance\n");
+  } else {
+      printf("Recommendation: Default allocation performs best\n");
+  }
+}
+
 void gpgpu_sim::update_core_allocation_for_policy(const std::string& policy,
   bool bypass_bypass_stream0_better,
   bool bypass_bypass_stream1_better) {
@@ -1922,9 +2077,11 @@ void gpgpu_sim::update_core_allocation_for_policy(const std::string& policy,
   for (unsigned core_id = 0; core_id < m_config.num_shader(); core_id++) {
     shader_core_ctx *core = get_core_by_sid(core_id);
     if (core) {
-      core->set_bypassL1D(false);
-      core->set_stream_bypassL1D(0,false);
-      core->set_stream_bypassL1D(1,false);
+      //core->set_bypassL1D(false);
+      //core->set_stream_bypassL1D(0,false);
+      //core->set_stream_bypassL1D(1,false);
+      core->start_transition = true;
+      core->transition_count = 0;
     }
   }
 
@@ -1980,123 +2137,12 @@ std::string gpgpu_sim::determine_policy_for_core(unsigned core_id) {
     return "default_allocation";
 }
 
-void gpgpu_sim::print_policy_comparison() {
-    // Calculate baseline IPC values for fairness comparison
-    double exclusive_stream0_ipc = (policy_performance_stats["exclusive_stream0"].even_ipc + policy_performance_stats["exclusive_stream0"].odd_ipc) / 2.0;
-    double exclusive_stream1_ipc = (policy_performance_stats["exclusive_stream1"].even_ipc + policy_performance_stats["exclusive_stream1"].odd_ipc) / 2.0;
-
-    long long exclusive_stream0_inst_count = (policy_performance_stats["exclusive_stream0"].even_inst_count + policy_performance_stats["exclusive_stream0"].odd_inst_count) / 2;
-    long long exclusive_stream1_inst_count = (policy_performance_stats["exclusive_stream1"].even_inst_count + policy_performance_stats["exclusive_stream1"].odd_inst_count) / 2;
-    
-    // print out odd, even ipc and total ipc
-    printf("\n=== IPC ===\n");
-    printf("%-20s %-12s %-12s %-12s %-12s %-12s %-12s %-12s\n", "Policy", "Even IPC", "Even Inst", "Odd IPC", "Odd Inst", "Avg IPC", "IPC Improvement", "Fairness Score", "Weighted Score");
-    printf("--------------------------------------------------------------------------------\n");
-    for (const auto& pair : policy_performance_stats) {
-        const PolicyStats& stats = pair.second;
-        double avg_ipc = stats.get_average_ipc();
-        
-        // Calculate IPC improvement compared to baseline exclusive policy
-        double ipc_improvement = 0.0;
-        if (stats.policy_name != "exclusive") {
-            ipc_improvement = ((stats.even_ipc/exclusive_stream0_ipc)*exclusive_stream0_inst_count
-                            + (stats.odd_ipc/exclusive_stream1_ipc)*exclusive_stream1_inst_count
-                          - 2.0 * (exclusive_stream0_inst_count + exclusive_stream1_inst_count)) /
-                          (2.0 * (exclusive_stream0_inst_count + exclusive_stream1_inst_count)) * 100.0; // Percentage improvement
-        }
-        
-        // Create fairness-aware metric
-        double fairness_factor = 2;
-        //double fairness_score = avg_ipc + fairness_factor * ipc_improvement * avg_ipc / 100.0;
-        double fairness_score = stats.even_inst_count + stats.odd_inst_count;
-        
-        double weighted_score = fairness_score;
-        if (stats.policy_name == "exclusive") {
-            weighted_score = fairness_score * 1;
-        } else if (stats.policy_name == "bypass_bypass") {
-            weighted_score = fairness_score * 1;
-        } else if (stats.policy_name == "bypass_share" || stats.policy_name == "share_bypass") {
-            weighted_score = fairness_score * 1;
-        }
-        printf("%-20s %-12.4f %-12d %-12.4f %-12d %-12.4f %-12.2f %-12.4f %-12.4f\n",
-               stats.policy_name.c_str(),
-               stats.even_ipc,
-               stats.even_inst_count,
-               stats.odd_ipc,
-               stats.odd_inst_count,
-               avg_ipc,
-               ipc_improvement,
-               fairness_score,
-               weighted_score);
-    }
-
-    // print out the best policy
-    printf("\n=== BEST POLICY ===\n");
-    std::string best_policy = "";
-    double best_weighted_score = 0.0;
-    
-    for (const auto& pair : policy_performance_stats) {
-        const PolicyStats& stats = pair.second;
-        double avg_ipc = stats.get_average_ipc();
-        
-        // Calculate IPC improvement compared to baseline exclusive policy
-        double ipc_improvement = 0.0;
-        if (stats.policy_name != "exclusive") {
-          ipc_improvement = ((stats.even_ipc/exclusive_stream0_ipc)*exclusive_stream0_inst_count
-                          + (stats.odd_ipc/exclusive_stream1_ipc)*exclusive_stream1_inst_count
-                        - 2.0 * (exclusive_stream0_inst_count + exclusive_stream1_inst_count)) /
-                        (2.0 * (exclusive_stream0_inst_count + exclusive_stream1_inst_count)) * 100.0; // Percentage improvement
-        }
-        
-        if (stats.policy_name == "exclusive_stream0" || stats.policy_name == "exclusive_stream1") {
-          continue;
-        }
-
-        // Create fairness-aware metric: IPC + fairness_factor * IPC_improvement
-        double fairness_factor = 2; // Weight for improvement consideration
-        //double fairness_score = avg_ipc + fairness_factor * ipc_improvement * avg_ipc;
-        double fairness_score = stats.even_inst_count + stats.odd_inst_count;
-        
-        // Apply policy-specific weights to the fairness score
-        double weighted_score = fairness_score;
-        if (stats.policy_name == "exclusive") {
-            weighted_score = fairness_score * 1;  // 20% boost for exclusive policy
-        } else if (stats.policy_name == "bypass_bypass") {
-            weighted_score = fairness_score * 1;  // 10% boost for bypass_bypass policy
-        } else if (stats.policy_name == "bypass_share" || stats.policy_name == "share_bypass") {
-            weighted_score = fairness_score * 1; // 5% boost for bypass_share and share_bypass policies
-        }
-        
-        if (weighted_score > best_weighted_score) {
-            best_weighted_score = weighted_score;
-            best_policy = stats.policy_name;
-        }
-    }
-    
-    printf("\n=== WEIGHTED FAIRNESS POLICY RECOMMENDATION ===\n");
-    printf("Best weighted policy: %s (Weighted Fairness Score: %.4f)\n", 
-           best_policy.c_str(), best_weighted_score);
-    
-    // Provide recommendations based on results
-    printf("\n=== POLICY RECOMMENDATIONS ===\n");
-    if (best_policy == "shared_l1_cache") {
-        printf("Recommendation: Use shared L1 cache policy for better performance\n");
-    } else if (best_policy == "share_bypass" || best_policy == "bypass_share") {
-        printf("Recommendation: Use shared with bypass policy for better performance\n");
-    } else if (best_policy == "bypass_bypass") {
-        printf("Recommendation: Use bypass bypass policy for better performance\n");
-    } else if (best_policy == "exclusive") {
-        printf("Recommendation: Use exclusive stream allocation for better performance\n");
-    } else {
-        printf("Recommendation: Default allocation performs best\n");
-    }
-}
 
 void gpgpu_sim::dynamic_scheduling_set_shared_cores(
   bool is_stream0_bypass,  bool is_stream1_bypass) {
   // clear the global_stream_core_ranges_set
   global_dynamic_core_ranges.clear();
-  
+  global_dynamic_core_ranges_vector.clear();
   // Create sorted stream list for consistent core assignment
   std::vector<unsigned long long> stream_list(global_unique_streams.begin(), global_unique_streams.end());
   std::sort(stream_list.begin(), stream_list.end());
@@ -2107,25 +2153,63 @@ void gpgpu_sim::dynamic_scheduling_set_shared_cores(
 
   for (unsigned i = 0; i < stream_list.size(); i++) {
     std::set<unsigned> core_range;
+    std::vector<unsigned> core_range_vector;
     unsigned long long stream_id = stream_list[i];
     unsigned start_core = stream_id == 0 ? 0 :1;
     unsigned end_core = stream_id == 0 ? total_cores -2 : total_cores -1;
     for (unsigned core = start_core; core <= end_core; core+=2) {
       core_range.insert(core);
       core_stream_mapping[core] = stream_id;
+      core_range_vector.push_back(core);
     }
     global_dynamic_core_ranges[stream_id] = core_range;
-    std::cout << "GLOBAL: STREAM " << stream_id << " -> cores [" << start_core << "-" << end_core << "]" << std::endl;
+    global_dynamic_core_ranges_vector[stream_id] = core_range_vector;
+    std::cout << "GLOBAL: STREAM " << stream_id << " -> cores [";
+    for (auto core : core_range_vector) {
+      std::cout << core << " ";
+    }
+    std::cout << std::endl;
+
+    // update core range for m_running_kernels_stream
+    if (stream_id == 0) {
+      for (auto& kernel : m_running_kernels_stream1) {
+        if (kernel!=nullptr) {
+          kernel->set_core_range(core_range);
+        }
+      }
+    } else {
+      for (auto& kernel : m_running_kernels_stream2) {
+        if (kernel!=nullptr) {
+          kernel->set_core_range(core_range);
+        }
+      }
+    }
+
+    // also update the m_running_kernels
+
+    for (auto& kernel : m_running_kernels) {
+      if (kernel!=nullptr && kernel->get_streamID() == stream_id) {
+        kernel->set_core_range(core_range);
+      }
+    }
+
+
+    // print out the core range for this stream
+    std::cout << "GLOBAL: STREAM " << stream_id << " -> cores ["; 
+    for (auto core_id : core_range) {
+      std::cout << core_id << " ";
+    }
+    std::cout << "]" << std::endl;
   }
 
 
   for (unsigned core_id = 0; core_id < total_cores; core_id+=1) {
     shader_core_ctx *core = get_core_by_sid(core_id);
     if (is_stream0_bypass && core_stream_mapping[core_id] == 0) {
-      core->set_stream_bypassL1D(0,true);
+      core->set_stream_bypassL1D_new(0,true);
     }
     if (is_stream1_bypass && core_stream_mapping[core_id] == 1) {
-      core->set_stream_bypassL1D(1,true);
+      core->set_stream_bypassL1D_new(1,true);
     }
   }
 
@@ -2141,6 +2225,7 @@ void gpgpu_sim::dynamic_scheduling_exclusive(
   bool is_stream0_bypass, bool is_stream1_bypass) {
   // clear the global_stream_core_ranges_set
   global_dynamic_core_ranges.clear();
+  global_dynamic_core_ranges_vector.clear();
 
   // Create sorted stream list for consistent core assignment
   std::vector<unsigned long long> stream_list(global_unique_streams.begin(), global_unique_streams.end());
@@ -2155,15 +2240,46 @@ void gpgpu_sim::dynamic_scheduling_exclusive(
   // stream 1 use the other half
   for (unsigned i = 0; i < stream_list.size(); i++) {
     std::set<unsigned> core_range;
+    std::vector<unsigned> core_range_vector;
     unsigned long long stream_id = stream_list[i];
     unsigned start_core = stream_id == 0 ? 0 : total_cores/2;
     unsigned end_core = stream_id == 0 ? total_cores/2 -1 : total_cores -1;
     for (unsigned core = start_core; core <= end_core; core++) {
       core_range.insert(core);
       core_stream_mapping[core] = stream_id;
+      core_range_vector.push_back(core);
     }
     global_dynamic_core_ranges[stream_id] = core_range;
-    std::cout << "GLOBAL: STREAM " << stream_id << " -> cores [" << start_core << "-" << end_core << "]" << std::endl;
+    global_dynamic_core_ranges_vector[stream_id] = core_range_vector;
+    // print out the core range for this stream
+    std::cout << "GLOBAL: STREAM " << stream_id << " -> cores ["; 
+    for (auto core_id : core_range_vector) {
+      std::cout << core_id << " ";
+    }
+    std::cout << "]" << std::endl;
+
+    // update core range for m_running_kernels_stream
+    if (stream_id == 0) {
+      for (auto& kernel : m_running_kernels_stream1) {
+        if (kernel!=nullptr) {
+          kernel->set_core_range(core_range);
+        }
+      }
+    } else {
+      for (auto& kernel : m_running_kernels_stream2) {
+        if (kernel!=nullptr) {
+          kernel->set_core_range(core_range);
+        }
+      }
+    }
+
+    // also update the m_running_kernels
+
+    for (auto& kernel : m_running_kernels) {
+      if (kernel!=nullptr && kernel->get_streamID() == stream_id) {
+        kernel->set_core_range(core_range);
+      }
+    }
   }
 
   // set bypass L1D for each core
@@ -2174,10 +2290,10 @@ void gpgpu_sim::dynamic_scheduling_exclusive(
     for (unsigned coreId = start_core; coreId <= end_core; coreId++) {
       shader_core_ctx *core = get_core_by_sid(coreId);
       if (is_stream0_bypass && stream_id == 0) {
-        core->set_stream_bypassL1D(0,true);
+        core->set_stream_bypassL1D_new(0,true);
       }
       if (is_stream1_bypass && stream_id == 1) {
-        core->set_stream_bypassL1D(1,true);
+        core->set_stream_bypassL1D_new(1,true);
       }
     }
   }
@@ -2212,6 +2328,12 @@ void gpgpu_sim::gpu_print_stat(unsigned long long streamID) {
               kernel_iter->second.start_cycle);
     }
   }
+
+  if (m_config.get_stream_partitioning() &&
+      !m_config.get_dynamic_core_scheduling()) {
+    m_shader_stats->print_ipc(stdout);
+  }
+
   printf("gpu_ipc = %12.4f\n", (float)gpu_sim_insn / gpu_sim_cycle);
   printf("gpu_tot_sim_cycle = %lld\n", gpu_tot_sim_cycle + gpu_sim_cycle);
   printf("gpu_tot_sim_insn = %lld\n", gpu_tot_sim_insn + gpu_sim_insn);
@@ -2272,14 +2394,18 @@ void gpgpu_sim::gpu_print_stat(unsigned long long streamID) {
   printf("gpu_total_sim_rate=%u\n",
          (unsigned)((gpu_tot_sim_insn + gpu_sim_insn) / elapsed_time));
 
+if (!m_config.get_stream_partitioning()) {
   // shader_print_l1_miss_stat( stdout );
   shader_print_cache_stats(stdout);
+}
 
   cache_stats core_cache_stats;
   core_cache_stats.clear();
   for (unsigned i = 0; i < m_config.num_cluster(); i++) {
     m_cluster[i]->get_cache_stats(core_cache_stats);
   }
+
+if (!m_config.get_stream_partitioning()) {
   printf("\nTotal_core_cache_stats:\n");
   core_cache_stats.print_stats(stdout, streamID,
                                "Total_core_cache_stats_breakdown");
@@ -2287,8 +2413,12 @@ void gpgpu_sim::gpu_print_stat(unsigned long long streamID) {
   core_cache_stats.print_fail_stats(stdout, streamID,
                                     "Total_core_cache_fail_stats_breakdown");
   shader_print_scheduler_stat(stdout, false);
+}
 
-  m_shader_stats->print(stdout);
+  // in stream partitioning mode, we don't print out the following stats
+  if (!m_config.get_stream_partitioning()) {
+    m_shader_stats->print(stdout);
+  }
 #ifdef GPGPUSIM_POWER_MODEL
   if (m_config.g_power_simulation_enabled) {
     if (m_config.g_power_simulation_mode > 0) {
@@ -2310,7 +2440,7 @@ void gpgpu_sim::gpu_print_stat(unsigned long long streamID) {
     mcpat_reset_perf_count(m_gpgpusim_wrapper);
   }
 #endif
-
+if (!m_config.get_stream_partitioning()) {
   // performance counter that are not local to one shader
   m_memory_stats->memlatstat_print(m_memory_config->m_n_mem,
                                    m_memory_config->nbk);
@@ -2319,7 +2449,10 @@ void gpgpu_sim::gpu_print_stat(unsigned long long streamID) {
       m_memory_partition_unit[i]->print(stdout);
     }
   }
+}
 
+
+if (!m_config.get_stream_partitioning()) {
   // L2 cache stats
   if (!m_memory_config->m_L2_config.disabled()) {
     cache_stats l2_stats;
@@ -2362,7 +2495,7 @@ void gpgpu_sim::gpu_print_stat(unsigned long long streamID) {
       total_l2_css.print_port_stats(stdout, "L2_cache");
     }
   }
-
+}
   if (m_config.gpgpu_cflog_interval != 0) {
     spill_log_to_file(stdout, 1, gpu_sim_cycle);
     insn_warp_occ_print(stdout);
@@ -2747,6 +2880,26 @@ void gpgpu_sim::issue_block2core() {
   }
 }
 
+
+void gpgpu_sim::issue_block2core_by_core_range() {
+  for (unsigned i = 0; i < m_shader_config->n_simt_clusters; i++) {
+    unsigned stream_id = core_stream_mapping[i];
+    unsigned core_id = get_next_core_id_by_core_range(stream_id);
+    unsigned num = m_cluster[core_id]->issue_block2core();
+    if (stream_id == 0 && num > 0) {
+      //std::cout << "STREAM 0: last issued " << m_last_cluster_issue_stream1 << " issue " << num << core_id << std::endl;
+      m_last_cluster_issue_stream1 = core_id;
+    } else if (stream_id == 1 && num > 0) {
+      std::cout << "STREAM 1: last issued " << m_last_cluster_issue_stream2 << " issue " << num << core_id << std::endl;
+      m_last_cluster_issue_stream2 = core_id;
+    }
+    if (num) {
+      m_total_cta_launched += num;
+    }
+  }
+}
+
+/*
 void gpgpu_sim::issue_block2core_stream_partitioning() {
   // Stream-based core partitioning: each stream gets its allocated core range
   // We support up to 2 streams with dedicated core ranges
@@ -2773,6 +2926,7 @@ void gpgpu_sim::issue_block2core_stream_partitioning() {
     }
   }
 }
+*/
 
 unsigned long long g_single_step =
     0;  // set this in gdb to single step the pipeline
@@ -2923,8 +3077,11 @@ void gpgpu_sim::cycle() {
     }
 #endif
 
-  if (m_config.get_stream_partitioning()) {
-    issue_block2core_stream_partitioning();
+  if (m_config.get_dynamic_core_scheduling()) {
+    issue_block2core_by_core_range();
+  } else if (m_config.get_stream_partitioning()) {
+    //issue_block2core_stream_partitioning();
+    issue_block2core_by_core_range();
   } else {
     issue_block2core();
   }
@@ -3277,4 +3434,41 @@ ldst_unit *gpgpu_sim::get_ldst_unit(unsigned ldst_unit_id) {
     return NULL;
   }
   return core->m_ldst_unit;
+}
+
+void gpgpu_sim::reset_simulation_state() {
+  printf("=== RESETTING SIMULATION EXECUTION STATE ===\n");
+  
+  // Reset global cycle counters
+  gpu_sim_cycle = 0;
+  gpu_core_abs_cycle = 0;
+  gpu_tot_sim_cycle = 0;
+  
+  // Clear all shader cores execution state
+  for (unsigned i = 0; i < m_shader_config->n_simt_clusters; i++) {
+    for (unsigned j = 0; j < m_shader_config->n_simt_cores_per_cluster; j++) {
+      unsigned sid = m_shader_config->cid_to_sid(j, i);
+      shader_core_ctx *core = get_core_by_sid(sid);
+      if (core) {
+        core->clear_extra_stats();
+      }
+    }
+  }
+  
+  // Invalidate all caches by calling on each core
+  for (unsigned i = 0; i < m_shader_config->n_simt_clusters; i++) {
+    for (unsigned j = 0; j < m_shader_config->n_simt_cores_per_cluster; j++) {
+      unsigned sid = m_shader_config->cid_to_sid(j, i);
+      shader_core_ctx *core = get_core_by_sid(sid);
+      if (core) {
+        core->cache_flush();
+        core->cache_invalidate();
+      }
+    }
+  }
+  
+  // Clear kernel tracking
+  m_finished_kernel.clear();
+  
+  printf("=== SIMULATION STATE RESET COMPLETE ===\n");
 }

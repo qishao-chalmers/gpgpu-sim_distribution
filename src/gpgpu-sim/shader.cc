@@ -617,6 +617,15 @@ float shader_core_ctx::get_current_occupancy(unsigned long long &active,
   }
 }
 
+void shader_core_stats::print_ipc(FILE *fout) const {
+  // print out the ipc of each core
+  for (unsigned i = 0; i < m_config->num_shader(); i++) {
+    if (shader_cycles[i] > 0 && m_num_sim_insn[i] > 0) {
+      fprintf(fout, "core %d ipc = %.4lf\n", i, (double)m_num_sim_insn[i] / (double)shader_cycles[i]);
+    }
+  }
+}
+
 void shader_core_stats::print(FILE *fout) const {
   unsigned long long thread_icount_uarch = 0;
   unsigned long long warp_icount_uarch = 0;
@@ -1155,6 +1164,10 @@ void shader_core_ctx::issue() {
   // for (unsigned i = 0; i < schedulers.size(); i++) {
   //    schedulers[i]->cycle();
   //}
+}
+
+void shader_core_ctx::info_transition_done() {
+  m_gpu->info_transition_done();
 }
 
 shd_warp_t &scheduler_unit::warp(int i) { return *((*m_warp)[i]); }
@@ -1984,6 +1997,7 @@ void shader_core_ctx::warp_inst_complete(const warp_inst_t &inst) {
 }
 
 void shader_core_ctx::print_core_stats() {
+  if (m_stats->get_ipc(m_sid) > 0)
   printf("Core %u ipc: %.4f, inst count: %lld stream Id: %d\n",
     m_sid, m_stats->get_ipc(m_sid), m_stats->m_num_sim_insn[m_sid], core_stream_mapping[m_sid]);
 }
@@ -2356,12 +2370,44 @@ bool ldst_unit::texture_cycle(warp_inst_t &inst, mem_stage_stall_type &rc_fail,
 bool ldst_unit::memory_cycle(warp_inst_t &inst,
                              mem_stage_stall_type &stall_reason,
                              mem_stage_access_type &access_type) {
+  /*
+  if (m_core->start_transition &&!m_core->transition_done) {
+    if (m_core->transition_count == 0) {
+      printf("Transition started, transition_count: %d time: %lld\n",
+      m_core->transition_count, m_core->get_gpu()->gpu_sim_cycle);
+    }
+    m_core->transition_count++;
+    if (m_core->transition_count > m_core->transition_count_threshold) {
+      m_core->transition_done = true;
+      printf("Transition done, transition_count: %d time: %lld\n",
+      m_core->transition_count, m_core->get_gpu()->gpu_sim_cycle);
+
+      m_core->info_transition_done();
+    }
+  }
+  */
+
   if (inst.empty() || ((inst.space.get_type() != global_space) &&
                        (inst.space.get_type() != local_space) &&
                        (inst.space.get_type() != param_space_local)))
     return true;
   if (inst.active_count() == 0) return true;
   if (inst.accessq_empty()) return true;
+
+
+  // wait for transition to be done
+  if (m_core->start_transition && !m_core->transition_done) {
+    if (!inst.isIssued()) {
+      stall_reason = TRANSITION_STALL;
+      return false;
+    }
+    /*
+    else {
+      printf("Transition is not done, but inst is issued, time: %lld\n",
+      m_core->get_gpu()->gpu_sim_cycle);
+    }
+    */
+  }
 
   mem_stage_stall_type stall_cond = NO_RC_FAIL;
   const mem_access_t &access = inst.accessq_back();
@@ -2386,6 +2432,16 @@ bool ldst_unit::memory_cycle(warp_inst_t &inst,
     // only support at most 2 streams
     assert(inst.get_streamID() < 2);
   }
+
+  // this is for corner cases, during switching from share to bypass
+  // avoid several memory access from the same warp, some is bypassed, some is not
+  //  if (bypassL1D &&
+  //      m_core->get_gpu()->get_config().get_dynamic_core_scheduling() &&
+  //      inst.isIssued() && !inst.get_bypassL1D()) {
+  //  bypassL1D = false;
+  //  printf("Meeting corner case, bypassL1D is set to false\n");
+  //}
+
   if (bypassL1D) {
     // bypass L1 cache
     unsigned control_size =
@@ -2403,6 +2459,8 @@ bool ldst_unit::memory_cycle(warp_inst_t &inst,
                (m_icnt->full(size, inst.is_store() || inst.isatomic()))) {
       stall_cond = ICNT_RC_FAIL;
     } else {
+      // prevent different memory access from the same warp,
+      // some is bypassed, some is not
       inst.set_bypassL1D(true);
       mem_fetch *mf =
           m_mf_allocator->alloc(inst, access,
@@ -3012,12 +3070,18 @@ void ldst_unit::cycle() {
                        GLOBAL_ACC_W) {  // global memory access
           if (m_core->get_config()->gmem_skip_L1D) bypassL1D = true;
           //else if ((m_core->get_config()->gmem_skip_L1D_stream0 || m_core->get_stream_bypassL1D(0))
+          //else if (m_core->get_gpu()->get_config().get_dynamic_core_scheduling() &&
+              //(CACHE_L1 != mf->get_inst().cache_op)) {
+              //  if (mf->get_bypassL1D() && m_core->get_stream_bypassL1D(mf->get_streamID())) {
+                //bypassL1D = true;
+              //}
+          //}
           else if ((m_core->get_config()->gmem_skip_L1D_stream0 || mf->get_bypassL1D())
                 && (mf->get_streamID() == 0) && (CACHE_L1 != mf->get_inst().cache_op))
           bypassL1D = true;
           // if inst is from stream 0, skip L1 cache if the option is enabled
-          //else if ((m_core->get_config()->gmem_skip_L1D_stream1 || m_core->get_stream_bypassL1D(1))
-          else if ((m_core->get_config()->gmem_skip_L1D_stream1 || mf->get_bypassL1D())
+          else if ((m_core->get_config()->gmem_skip_L1D_stream1 || m_core->get_stream_bypassL1D(1))
+          //else if ((m_core->get_config()->gmem_skip_L1D_stream1 || mf->get_bypassL1D())
                 && (mf->get_streamID() == 1) && (CACHE_L1 != mf->get_inst().cache_op))
           bypassL1D = true;
         }
@@ -3057,7 +3121,7 @@ void ldst_unit::cycle() {
   done &= memory_cycle(pipe_reg, rc_fail, type);
   m_mem_rc = rc_fail;
 
-  if (!done) {  // log stall types and return
+  if (!done && rc_fail != TRANSITION_STALL) {  // log stall types and return
     assert(rc_fail != NO_RC_FAIL);
     m_stats->gpgpu_n_stall_shd_mem++;
     m_stats->gpu_stall_shd_mem_breakdown[type][rc_fail]++;
@@ -4787,7 +4851,17 @@ unsigned simt_core_cluster::issue_block2core() {
             //    k ? k->name().c_str() : "NULL", k->get_streamID(), core,
             //    m_core[core]->get_sid());
             m_core[core]->set_kernel(k);
+            printf("GPGPU-Sim uArch: Shader ID %d bind to kernel %u \'%s\' stream %lld gpu_sim_cycle %lld\n",
+              m_core[core]->get_sid(), k->get_uid(), k->name().c_str(), k->get_streamID(),
+              m_gpu->gpu_sim_cycle+m_gpu->gpu_tot_sim_cycle);
           }
+          /*
+          else {
+            printf("No kernel found for core %u sid %d\n", core,
+                m_core[core]->get_sid());
+          }
+          */
+
           kernel = k;
         }
       }
@@ -4804,7 +4878,12 @@ unsigned simt_core_cluster::issue_block2core() {
         // wait till current kernel finishes
         if (m_core[core]->get_not_completed() == 0) {
           kernel_info_t *k = m_gpu->select_kernel();
-          if (k) m_core[core]->set_kernel(k);
+          if (k) {
+            m_core[core]->set_kernel(k);
+            printf("GPGPU-Sim uArch: Shader ID %d bind to kernel %u \'%s\' stream %lld gpu_sim_cycle %lld\n",
+            m_core[core]->get_sid(), k->get_uid(), k->name().c_str(), k->get_streamID(),
+            m_gpu->gpu_sim_cycle+m_gpu->gpu_tot_sim_cycle);
+          }
           kernel = k;
         }
       }
@@ -5184,3 +5263,5 @@ void exec_shader_core_ctx::checkExecutionStatusAndUpdate(warp_inst_t &inst,
     }
   }
 }
+
+

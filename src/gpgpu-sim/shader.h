@@ -2017,6 +2017,8 @@ class shader_core_stats : public shader_core_stats_pod {
 
   void print(FILE *fout) const;
 
+  void print_ipc(FILE *fout) const;
+
   double get_ipc(unsigned core_id) const {
     if (shader_current_cycle[core_id] == shader_start_cycle[core_id]) {
       return 0;
@@ -2145,20 +2147,20 @@ class shader_core_ctx : public core_t {
   void set_kernel(kernel_info_t *k) {
     // only enable the bypass L1D when the kernel is launched
     // so we didnt change the core config during the kernel execution
-    gmem_skip_L1D_stream0 = gmem_skip_L1D_stream0_en;
-    gmem_skip_L1D_stream1 = gmem_skip_L1D_stream1_en;
+    //gmem_skip_L1D_stream0_init = gmem_skip_L1D_stream0_init;
+    //  gmem_skip_L1D_stream1_init = gmem_skip_L1D_stream1_init;
 
+    /*
     bool isBypass = k != NULL ?
                     k->get_streamID() == 0 ?
-                    gmem_skip_L1D_stream0_en :
-                    gmem_skip_L1D_stream1_en :
+                    gmem_skip_L1D_stream0_init :
+                    gmem_skip_L1D_stream1_init :
                     false;
-    
+    */
+
     assert(k);
     m_kernel = k;
-    //        k->inc_running();
-    printf("GPGPU-Sim uArch: Shader %d shader ID %d bind to kernel %u \'%s\' %s\n", m_sid,
-           m_kernel->get_uid(), m_sid, m_kernel->name().c_str(), isBypass ? "bypass cache" : " use cache");
+    //k->inc_running();
   }
   PowerscalingCoefficients *scaling_coeffs;
   // accessors
@@ -2667,22 +2669,43 @@ class shader_core_ctx : public core_t {
 
   void set_stream_bypassL1D(unsigned stream_id, bool bypass) {
     if (stream_id == 0) {
-      gmem_skip_L1D_stream0_en = bypass;
+      gmem_skip_L1D_stream0_init = bypass;
     } else if (stream_id == 1) {
-      gmem_skip_L1D_stream1_en = bypass;
+      gmem_skip_L1D_stream1_init = bypass;
     } else {
       assert(false && "Invalid stream id");
     }
   }
+
+  void set_stream_bypassL1D_new(unsigned stream_id, bool bypass) {
+    if (stream_id == 0) {
+      gmem_skip_L1D_stream0_new = bypass;
+    } else if (stream_id == 1) {
+      gmem_skip_L1D_stream1_new = bypass;
+    } else {
+      assert(false && "Invalid stream id");
+    }
+  }
+
   bool get_stream_bypassL1D(unsigned stream_id) const {
     if (stream_id == 0) {
-      return gmem_skip_L1D_stream0_en;
+      if (transition_done) {
+        return gmem_skip_L1D_stream0_new;
+      } else {
+        return gmem_skip_L1D_stream0_init;
+      }
     } else if (stream_id == 1) {
-      return gmem_skip_L1D_stream1_en;
+      if (transition_done) {
+        return gmem_skip_L1D_stream1_new;
+      } else {
+        return gmem_skip_L1D_stream1_init;
+      }
     } else {
       assert(false && "Invalid stream id");
     }
   }
+
+  void info_transition_done();
 
  private:
   unsigned int m_occupied_n_threads;
@@ -2692,11 +2715,19 @@ class shader_core_ctx : public core_t {
   std::bitset<MAX_THREAD_PER_SM> m_occupied_hwtid;
   std::map<unsigned int, unsigned int> m_occupied_cta_to_hwtid;
   bool bypassL1D = false;
-  bool gmem_skip_L1D_stream0_en = false;
-  bool gmem_skip_L1D_stream1_en = false;
 
-  bool gmem_skip_L1D_stream0 = false;
-  bool gmem_skip_L1D_stream1 = false;
+  bool gmem_skip_L1D_stream0_init = false;
+  bool gmem_skip_L1D_stream1_init = false;
+
+  bool gmem_skip_L1D_stream0_new = false;
+  bool gmem_skip_L1D_stream1_new = false;
+
+public:
+  bool start_transition = false;
+  bool transition_done = false;
+
+  unsigned transition_count = 0;
+  unsigned transition_count_threshold = 10000;
 };
 
 class exec_shader_core_ctx : public shader_core_ctx {
