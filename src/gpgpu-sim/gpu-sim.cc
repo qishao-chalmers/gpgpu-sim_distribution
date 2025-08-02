@@ -101,6 +101,8 @@ std::map<unsigned long long, std::pair<unsigned, unsigned>> global_stream_core_r
 std::set<unsigned long long> global_unique_streams;
 std::map<unsigned,long long > stream_inst_count;
 
+bool is_policy_change = false;
+bool is_policy_change_done = false;
 
 /* Clock Domains */
 
@@ -774,8 +776,10 @@ void gpgpu_sim_config::reg_options(option_parser_t opp) {
       "10000:0");
   option_parser_register(opp, "-gpgpu_stream_intlv_core", OPT_BOOL, &gpgpu_stream_intlv_core,
   "interleave the cores of the two streams (default = disabled)", "0");
-  option_parser_register(opp, "-gpgpu_dynamic_core_scheduling", OPT_BOOL, &gpgpu_dynamic_core_scheduling,
-    "dynamic core scheduling (default = disabled)", "0");
+    option_parser_register(opp, "-gpgpu_dynamic_core_scheduling", OPT_BOOL, &gpgpu_dynamic_core_scheduling,
+      "dynamic core scheduling (default = disabled)", "0");
+  option_parser_register(opp, "-gpgpu_dyno_core_scheduling", OPT_BOOL, &gpgpu_dyno_core_scheduling,
+      "dyno core scheduling (default = disabled)", "0");
   option_parser_register(opp, "-liveness_message_freq", OPT_INT64,
                          &liveness_message_freq,
                          "Minimum number of seconds between simulation "
@@ -1034,7 +1038,8 @@ kernel_info_t *gpgpu_sim::select_kernel(unsigned core_id) {
   } else if (m_config.get_stream_intlv_core()) {
     if (core_id % 2 == 0)
       isStreamOne = true;
-  } else if (m_config.get_dynamic_core_scheduling()) {
+  } else if (m_config.get_dynamic_core_scheduling() ||
+             m_config.get_dyno_core_scheduling()) {
     isStreamOne = core_stream_mapping[core_id] == 0;
   } else {
     isStreamOne = core_id < total_cores/2;
@@ -1047,7 +1052,8 @@ kernel_info_t *gpgpu_sim::select_kernel(unsigned core_id) {
   }
 
   // in dynamic core mode, check the core id with kernel stream ID
-  if (m_config.get_dynamic_core_scheduling()) {
+  if (m_config.get_dynamic_core_scheduling()||
+      m_config.get_dyno_core_scheduling()) {
     if (kernel) {
       if (kernel->get_streamID() != core_stream_mapping[core_id]) {
         //printf("kernel stream ID %u, core stream ID %u, kernel name %s\n",
@@ -1242,6 +1248,8 @@ gpgpu_sim::gpgpu_sim(const gpgpu_sim_config &config, gpgpu_context *ctx)
 
   gpu_kernel_time.clear();
 
+  collect_info_core_bitset.reset();
+
   // TODO: somehow move this logic to the sst_gpgpu_sim constructor?
   if (!m_config.is_SST_mode()) {
     // Init memory if not in SST mode
@@ -1279,7 +1287,8 @@ gpgpu_sim::gpgpu_sim(const gpgpu_sim_config &config, gpgpu_context *ctx)
   
   // Initialize stream-based allocation variables
 
-  if (m_config.get_dynamic_core_scheduling()) {
+  if (m_config.get_dynamic_core_scheduling() ||
+      m_config.get_dyno_core_scheduling()) {
     m_last_cluster_issue_stream1 = m_shader_config->n_simt_clusters;
     m_last_cluster_issue_stream2 = m_shader_config->n_simt_clusters;
   } else if (m_config.get_stream_intlv_core()){
@@ -1302,8 +1311,8 @@ gpgpu_sim::gpgpu_sim(const gpgpu_sim_config &config, gpgpu_context *ctx)
 
 unsigned gpgpu_sim::get_next_core_id_by_core_range(unsigned stream_id) {
 
-  auto& core_range = m_config.get_dynamic_core_scheduling() ?
-  global_dynamic_core_ranges_vector[stream_id] :
+  auto& core_range = (m_config.get_dynamic_core_scheduling() || m_config.get_dyno_core_scheduling()) ?
+                    global_dynamic_core_ranges_vector[stream_id] :
                     global_stream_core_ranges_vector[stream_id];
 
   unsigned last_stream_id = stream_id == 0 ? m_last_cluster_issue_stream1 : m_last_cluster_issue_stream2;
@@ -1405,6 +1414,9 @@ void gpgpu_sim::info_transition_done() {
     shader_core_ctx *core = get_core_by_sid(core_id);
     if (core) {
       core->transition_done = true;
+
+      //printf("GPGPU-Sim uArch: Shader %d transition done, core %d\n",
+      //core_id, core->get_sid());
       // invalidate all l1 cache
       //core->cache_flush();
       //core->cache_invalidate();
@@ -1596,6 +1608,9 @@ void gpgpu_sim::deadlock_check() {
         gpu_sim_insn_last_update_sid, (unsigned)gpu_sim_insn_last_update,
         (unsigned)(gpu_tot_sim_cycle - gpu_sim_cycle),
         (unsigned)(gpu_sim_cycle - gpu_sim_insn_last_update));
+    printf(
+          "\n\nGPGPU-Sim uArch: sim_cycle: %lld, tot_sim_cycle: %lld\n",
+          gpu_sim_cycle, gpu_tot_sim_cycle);
     unsigned num_cores = 0;
     for (unsigned i = 0; i < m_shader_config->n_simt_clusters; i++) {
       unsigned not_completed = m_cluster[i]->get_not_completed();
@@ -1769,33 +1784,287 @@ void gpgpu_sim::clear_executed_kernel_info() {
 //m_sid, m_stats->get_ipc(m_sid), kernel, kernel->name().c_str(), cta_num, m_gpu->gpu_sim_cycle, m_gpu->gpu_tot_sim_cycle);
 
 void gpgpu_sim::profile_kernel_stats(unsigned m_sid, double ipc, kernel_info_t *kernel){
-    if (!m_config.get_dynamic_core_scheduling())
+    if (!m_config.get_dynamic_core_scheduling() && !m_config.get_dyno_core_scheduling())
         return;
 
+    unsigned stream_id = core_stream_mapping[m_sid];
+
     // if dynamic scheduling is configured, we don't need to profile the kernel stats
-    if (dynamic_scheduling_configured) {
+    //if (dynamic_scheduling_configured) {
+    //  return;
+    //}
+    if (!dynamic_scheduling_configured) {
+      // if the core id is not in the map, initialize it to 0
+      if (collect_info_core_inst_count.find(m_sid%12) == collect_info_core_inst_count.end()) {
+        collect_info_core_inst_count[m_sid%12] = 0;
+      } else {
+        collect_info_core_inst_count[m_sid%12]++;
+      }
+    } else {
+
+      if (collect_info_stream_inst_count.find(stream_id) == collect_info_stream_inst_count.end()) {
+        collect_info_stream_inst_count[stream_id] = 0;
+      } else {
+        collect_info_stream_inst_count[stream_id]++;
+      }
+    }
+
+
+    // 500 threshold for core profiling
+    if (!dynamic_scheduling_configured && collect_info_core_inst_count[m_sid%12] > 200) {
+      collect_info_core_bitset.set(m_sid%12);
+    } else if (dynamic_scheduling_configured && collect_info_stream_inst_count[stream_id] > 20000) {
+      // 500000 threshold for stream running
+      collect_stream_bitset.set(stream_id);
+    }
+  
+    if (collect_info_core_bitset.all()) {
+      printf("All cores have collected info\n");
+    } else if (collect_stream_bitset.all()) {
+      printf("All streams have collected info\n");
+    } else {
+      // print out the core id and inst count and also collect_info_core_bitset
+      //for (unsigned core_id = 0; core_id < 12; core_id++) {
+      //  printf("Core %u has collected %u insts\n",
+      //  core_id, collect_info_core_inst_count[core_id]);
+      //}
+      //printf("Collect info core bitset: %s\n", collect_info_core_bitset.to_string().c_str());
       return;
     }
-    dynamic_core_scheduling();
 
-    info_transition_done();
+
+    if (dynamic_scheduling_configured) {
+      sampling_dynamic_core_scheduling();
+      dynamic_scheduling_configured = false;
+    } else {
+      dynamic_core_scheduling();
+    }
+
+    collect_info_core_inst_count.clear();
+    collect_info_core_bitset.reset();
+    collect_stream_bitset.reset();
+}
+
+void gpgpu_sim::sampling_dyno_core_scheduling() {
+  unsigned total_cores = m_config.num_shader();
+  unsigned num_streams = global_unique_streams.size();
+  // consider SM pairs:
+  // SM0/SM1 will be shared by two streams, sharing L1 cache
+  // SM2/SM3 will be shared by two streams, SM2 bypasses L1 cache
+  // SM4/SM5 will be shared by two streams, SM5 bypasses L1 cache
+  // SM6/SM7 will be shared by two streams, both bypasses L1 cache
+  // SM8/SM9 will be used by stream 0 exclusively, sharing L1 cache
+  // SM10/SM11 will be used by stream 1 exclusively, sharing L1 cache
+  // stream 0 will be using: 0,2,4,6, 8, 9, 12,14,16,18,20,21
+  // stream 1 will be using: 1,3,5,7,10,11, 13,15,17,19,22,23
+
+  std::vector<unsigned long long> stream_list(global_unique_streams.begin(), global_unique_streams.end());
+  std::sort(stream_list.begin(), stream_list.end());
+
+  for (unsigned i = 0; i < num_streams; i++) {
+    unsigned long long stream_id = stream_list[i];
+    unsigned start_core = stream_id == 0 ? 0 : 1;
+    unsigned end_core = total_cores - 1;
+
+    std::set<unsigned> core_range;
+    std::vector<unsigned> core_range_vector;
+
+    // during the sampling phase, we only need to consider the first 12 cores
+    unsigned core = start_core;
+    core_range.insert(core);
+    if (stream_id == 0) {
+      if (core + 2 <= end_core)
+        core_range.insert(core + 2);
+      if (core + 4 <= end_core)
+          core_range.insert(core + 4);
+      if (core + 6 <= end_core)
+        core_range.insert(core + 6);
+      if (core + 8 <= end_core)
+        core_range.insert(core + 8);
+      if (core + 9 <= end_core)
+        core_range.insert(core + 9);
+    } else {
+      if (core + 2 <= end_core)
+        core_range.insert(core + 2);
+      if (core + 4 <= end_core)
+        core_range.insert(core + 4);
+      if (core + 6 <= end_core)
+        core_range.insert(core + 6);
+      if (core + 9 <= end_core)
+        core_range.insert(core + 9);
+      if (core + 10 <= end_core)
+        core_range.insert(core + 10);
+    }      
+  
+    for (auto core : core_range) {
+        core_stream_mapping[core] = stream_id;
+    }
+
+    global_dynamic_core_ranges[stream_id] = core_range;
+
+    core_range_vector = std::vector<unsigned>(core_range.begin(), core_range.end());
+    // sort the core_range_vector in ascending order
+    std::sort(core_range_vector.begin(), core_range_vector.end());
+    global_dynamic_core_ranges_vector[stream_id] = core_range_vector;
+    std::cout << "GLOBAL: STREAM " << stream_id << " -> cores [" << start_core << "-" << end_core << "]" << std::endl;
+    // print out the core_range_vector
+    std::cout << "GLOBAL: STREAM VECTOR " << stream_id << " -> cores: ";
+    for (auto core : core_range_vector) {
+      std::cout << core << " ";
+    }
+    std::cout << std::endl;
+  }
+
+  unsigned core_id = 0;
+  unsigned sm2_id = core_id + 2;
+  unsigned sm5_id = core_id + 5;
+  unsigned sm6_id = core_id + 6;
+  unsigned sm7_id = core_id + 7;
+  shader_core_ctx *core = get_core_by_sid(sm2_id);
+  core->set_stream_bypassL1D(0,true);
+  core = get_core_by_sid(sm5_id);
+  core->set_stream_bypassL1D(1,true);
+  core = get_core_by_sid(sm6_id);
+  core->set_stream_bypassL1D(0,true);
+  core = get_core_by_sid(sm7_id);
+  core->set_stream_bypassL1D(1,true); 
+}
+
+void gpgpu_sim::sampling_dynamic_core_scheduling() {
+  printf("Sampling dynamic core scheduling cycle %lld\n", gpu_sim_cycle+gpu_tot_sim_cycle);
+  global_dynamic_core_ranges.clear();
+  global_dynamic_core_ranges_vector.clear();
+  core_stream_mapping.clear();
+  unsigned total_cores = m_config.num_shader();
+  unsigned num_streams = global_unique_streams.size();
+
+  // create a map to store the core range for each stream
+  std::map<unsigned long long, std::set<unsigned>> core_range_map;
+  std::map<unsigned long long, std::vector<unsigned>> core_range_vector_map;
+
+  for (unsigned core_id = 0; core_id < total_cores; core_id++) {
+    shader_core_ctx *core = get_core_by_sid(core_id);
+    core->copy_stream_bypassL1D_new_to_old();
+  }
+
+  // create a map to store the core stream mapping
+  
+  // consider SM pairs:
+  // SM0/SM1 will be shared by two streams, sharing L1 cache
+  // SM2/SM3 will be shared by two streams, SM2 bypasses L1 cache
+  // SM4/SM5 will be shared by two streams, SM5 bypasses L1 cache
+  // SM6/SM7 will be shared by two streams, both bypasses L1 cache
+  // SM8/SM9 will be used by stream 0 exclusively, sharing L1 cache
+  // SM10/SM11 will be used by stream 1 exclusively, sharing L1 cache
+  // stream 0 will be using: 0,2,4,6, 8, 9, 12,14,16,18,20,21
+  // stream 1 will be using: 1,3,5,7,10,11, 13,15,17,19,22,23
+
+  std::vector<unsigned long long> stream_list(global_unique_streams.begin(), global_unique_streams.end());
+  std::sort(stream_list.begin(), stream_list.end());
+
+  for (unsigned i = 0; i < num_streams; i++) {
+    unsigned long long stream_id = stream_list[i];
+    unsigned start_core = stream_id == 0 ? 0 : 1;
+    unsigned end_core = total_cores - 1;
+
+    std::set<unsigned> core_range;
+    std::vector<unsigned> core_range_vector;
+    for (unsigned core = start_core; core <= end_core; core+=12) {
+      core_range.insert(core);
+      if (stream_id == 0) {
+          if (core + 2 <= end_core)
+            core_range.insert(core + 2);
+          if (core + 4 <= end_core)
+            core_range.insert(core + 4);
+          if (core + 6 <= end_core)
+            core_range.insert(core + 6);
+          if (core + 8 <= end_core)
+            core_range.insert(core + 8);
+          if (core + 9 <= end_core)
+            core_range.insert(core + 9);
+      } else {
+        if (core + 2 <= end_core)
+          core_range.insert(core + 2);
+        if (core + 4 <= end_core)
+          core_range.insert(core + 4);
+        if (core + 6 <= end_core)
+          core_range.insert(core + 6);
+        if (core + 9 <= end_core)
+          core_range.insert(core + 9);
+        if (core + 10 <= end_core)
+          core_range.insert(core + 10);
+      }
+    }
+
+    for (auto core : core_range) {
+      core_stream_mapping[core] = stream_id;
+    }
+
+    global_dynamic_core_ranges[stream_id] = core_range;
+
+    // update core range for m_running_kernels_stream
+    if (stream_id == 0) {
+      for (auto& kernel : m_running_kernels_stream1) {
+        if (kernel!=nullptr) {
+          kernel->set_core_range(core_range);
+        }
+      }
+    } else {
+      for (auto& kernel : m_running_kernels_stream2) {
+        if (kernel!=nullptr) {
+          kernel->set_core_range(core_range);
+        }
+      }
+    }
+
+    // also update the m_running_kernels
+
+    for (auto& kernel : m_running_kernels) {
+      if (kernel!=nullptr && kernel->get_streamID() == stream_id) {
+        kernel->set_core_range(core_range);
+      }
+    }
+
+    core_range_vector = std::vector<unsigned>(core_range.begin(), core_range.end());
+    // sort the core_range_vector in ascending order
+    std::sort(core_range_vector.begin(), core_range_vector.end());
+    global_dynamic_core_ranges_vector[stream_id] = core_range_vector;
+    std::cout << "GLOBAL: STREAM " << stream_id << " -> cores [" << start_core << "-" << end_core << "]" << std::endl;
+    // print out the core_range_vector
+    std::cout << "GLOBAL: STREAM VECTOR " << stream_id << " -> cores: ";
+    for (auto core : core_range_vector) {
+      std::cout << core << " ";
+    }
+    std::cout << std::endl;
+  }
+  for (unsigned core_id = 0; core_id < total_cores; core_id+=12) {
+    unsigned sm2_id = core_id + 2;
+    unsigned sm5_id = core_id + 5;
+    unsigned sm6_id = core_id + 6;
+    unsigned sm7_id = core_id + 7;
+    shader_core_ctx *core = get_core_by_sid(sm2_id);
+    core->set_stream_bypassL1D_new(0,true);
+    core = get_core_by_sid(sm5_id);
+    core->set_stream_bypassL1D_new(1,true);
+    core = get_core_by_sid(sm6_id);
+    core->set_stream_bypassL1D_new(0,true);
+    core = get_core_by_sid(sm7_id);
+    core->set_stream_bypassL1D_new(1,true);
+  }
+
+  for (unsigned core_id = 0; core_id < total_cores; core_id++) {
+    shader_core_ctx *core = get_core_by_sid(core_id);
+    core->start_transition = true;
+    core->transition_count = 0;
+    core->get_stats()->reset_m_num_sim_insn_profile(core_id, gpu_sim_cycle+gpu_tot_sim_cycle);
+  }
+
+  is_policy_change = true;
+  is_policy_change_done = false;
 }
 
 void gpgpu_sim::dynamic_core_scheduling() {
-
-  if (dynamic_scheduling_configured) {
-    return;
-  }
-
-  // we can start dynamic core scheduling
-  bool isWarmup = gpu_core_abs_cycle > profile_cycle_threshold;
-
-  profile_sample_count++;
-  if (profile_sample_count < 100 && !isWarmup) {
-  //if (profile_sample_count < 500 && !isWarmup) {
-    return;
-  }
-
+  printf("Dynamic core scheduling cycle %lld\n", gpu_sim_cycle+gpu_tot_sim_cycle);
   dynamic_scheduling_configured = true;
 
   // get core and print out the ipc from stats and inst count
@@ -1806,15 +2075,23 @@ void gpgpu_sim::dynamic_core_scheduling() {
     }
   }
 
-  for (unsigned SM_pair_id = 0; SM_pair_id < m_config.num_shader()/2; SM_pair_id++) {
+  for (unsigned core_id = 0; core_id < m_config.num_shader(); core_id++) {
+    shader_core_ctx *core = get_core_by_sid(core_id);
+    core->copy_stream_bypassL1D_new_to_old();
+  }
+
+  unsigned end_core_id = m_config.get_dyno_core_scheduling() ? 12 : m_config.num_shader();
+
+  for (unsigned SM_pair_id = 0; SM_pair_id < end_core_id/2; SM_pair_id++) {
     unsigned even_core_id = SM_pair_id*2;
     unsigned odd_core_id = SM_pair_id*2 + 1;
     shader_core_ctx *even_core = get_core_by_sid(even_core_id);
     shader_core_ctx *odd_core = get_core_by_sid(odd_core_id);
 
-    double even_ipc = even_core->get_stats()->get_ipc(even_core_id);  
-    double odd_ipc = odd_core->get_stats()->get_ipc(odd_core_id);
-
+    //double even_ipc = even_core->get_stats()->get_ipc(even_core_id);  
+    //double odd_ipc = odd_core->get_stats()->get_ipc(odd_core_id);
+    double even_ipc = even_core->get_stats()->get_ipc_profile(even_core_id);  
+    double odd_ipc = odd_core->get_stats()->get_ipc_profile(odd_core_id);
     long long even_inst_count = even_core->get_stats()->m_num_sim_insn[even_core_id];
     long long odd_inst_count = odd_core->get_stats()->m_num_sim_insn[odd_core_id];
 
@@ -1856,31 +2133,6 @@ void gpgpu_sim::dynamic_core_scheduling() {
     avg_stats.odd_inst_count /= stats_vector.size();
     policy_performance_stats[policy_name] = avg_stats;
   }
-
-  // check cores for each policy has ipc > 0
-  bool ipc_lt_0 = false;
-  for (auto& pair : policy_performance_stats) {
-    const PolicyStats& stats = pair.second;
-    if (stats.even_ipc > 0 && stats.odd_ipc > 0) {
-      continue;
-    } else {
-      ipc_lt_0 = true;
-      break;
-    }
-  }
-
-  if (ipc_lt_0 || policy_performance_stats.size() != 6) {
-    if (profile_cycle_threshold < 200000) {
-      profile_cycle_threshold = profile_cycle_threshold*1.1;
-    }
-
-    dynamic_scheduling_configured = false;
-
-    policy_performance_stats_vector.clear();
-    policy_performance_stats.clear();
-    return;
-  }
-
 
   // merge exclusive_stream0 and exclusive_stream1 into exclusive
   PolicyStats exclusive_stats;
@@ -1933,11 +2185,14 @@ void gpgpu_sim::dynamic_core_scheduling() {
   
   // Apply the best policy
   if (!best_policy.empty()) {
-    printf("DYNAMIC SCHEDULING: Selected policy '%s' with score %.4f cycle %lld\n", 
-           best_policy.c_str(), best_score, gpu_core_abs_cycle);
+    printf("DYNAMIC SCHEDULING: Selected policy '%s' with score %.4f cycle %lld total cycle %lld\n", 
+           best_policy.c_str(), best_score, gpu_core_abs_cycle, gpu_tot_sim_cycle+gpu_sim_cycle);
     
     // Update core allocations based on the best policy
     update_core_allocation_for_policy(best_policy);
+
+    m_last_cluster_issue_stream1 = m_shader_config->n_simt_clusters;
+    m_last_cluster_issue_stream2 = m_shader_config->n_simt_clusters;
   }
 }
 
@@ -2073,17 +2328,7 @@ void gpgpu_sim::print_policy_comparison() {
 void gpgpu_sim::update_core_allocation_for_policy(const std::string& policy,
   bool bypass_bypass_stream0_better,
   bool bypass_bypass_stream1_better) {
-  // first reset all core to not bypass L1
-  for (unsigned core_id = 0; core_id < m_config.num_shader(); core_id++) {
-    shader_core_ctx *core = get_core_by_sid(core_id);
-    if (core) {
-      //core->set_bypassL1D(false);
-      //core->set_stream_bypassL1D(0,false);
-      //core->set_stream_bypassL1D(1,false);
-      core->start_transition = true;
-      core->transition_count = 0;
-    }
-  }
+
 
   // Update core allocations based on the selected policy
   if (policy == "shared_l1_cache") {
@@ -2109,6 +2354,23 @@ void gpgpu_sim::update_core_allocation_for_policy(const std::string& policy,
     // Default policy: No special allocation
     printf("Applying default allocation policy\n");
   }
+
+  // first reset all core to not bypass L1
+    for (unsigned core_id = 0; core_id < m_config.num_shader(); core_id++) {
+      shader_core_ctx *core = get_core_by_sid(core_id);
+      if (core) {
+        //core->set_bypassL1D(false);
+        //core->set_stream_bypassL1D(0,false);
+        //core->set_stream_bypassL1D(1,false);
+        core->start_transition = true;
+        core->transition_count = 0;
+        // SILLY DEBUG
+        //core->transition_done = true;
+      }
+    }
+
+    is_policy_change = true;
+    is_policy_change_done = false;
 }
 
 std::string gpgpu_sim::determine_policy_for_core(unsigned core_id) {
@@ -2151,11 +2413,15 @@ void gpgpu_sim::dynamic_scheduling_set_shared_cores(
 
   core_stream_mapping.clear();
 
+  // in the dyno core scheduling, the first 12 core are always in sampling phase
+  // so we need to start from the 13th core
+  unsigned start_core_id = m_config.get_dyno_core_scheduling() ? 12 : 0;
+
   for (unsigned i = 0; i < stream_list.size(); i++) {
     std::set<unsigned> core_range;
     std::vector<unsigned> core_range_vector;
     unsigned long long stream_id = stream_list[i];
-    unsigned start_core = stream_id == 0 ? 0 :1;
+    unsigned start_core = stream_id == 0 ? start_core_id :start_core_id+1;
     unsigned end_core = stream_id == 0 ? total_cores -2 : total_cores -1;
     for (unsigned core = start_core; core <= end_core; core+=2) {
       core_range.insert(core);
@@ -2203,7 +2469,7 @@ void gpgpu_sim::dynamic_scheduling_set_shared_cores(
   }
 
 
-  for (unsigned core_id = 0; core_id < total_cores; core_id+=1) {
+  for (unsigned core_id = start_core_id; core_id < total_cores; core_id+=1) {
     shader_core_ctx *core = get_core_by_sid(core_id);
     if (is_stream0_bypass && core_stream_mapping[core_id] == 0) {
       core->set_stream_bypassL1D_new(0,true);
@@ -2233,7 +2499,11 @@ void gpgpu_sim::dynamic_scheduling_exclusive(
 
   unsigned total_cores = get_config().num_shader();
 
-
+    // in the dyno core scheduling, the first 12 core are always in sampling phase
+  // so we need to start from the 13th core
+  unsigned start_core_id = m_config.get_dyno_core_scheduling() ? 12 : 0;
+  unsigned end_core_id_stream0 = m_config.get_dyno_core_scheduling() ?
+                                (total_cores-12)/2-1+12:total_cores/2 -1;
   core_stream_mapping.clear();
 
   // stream 0 use half of the cores
@@ -2242,8 +2512,9 @@ void gpgpu_sim::dynamic_scheduling_exclusive(
     std::set<unsigned> core_range;
     std::vector<unsigned> core_range_vector;
     unsigned long long stream_id = stream_list[i];
-    unsigned start_core = stream_id == 0 ? 0 : total_cores/2;
-    unsigned end_core = stream_id == 0 ? total_cores/2 -1 : total_cores -1;
+    unsigned start_core = stream_id == 0 ? start_core_id : end_core_id_stream0+1;
+    unsigned end_core = stream_id == 0 ? end_core_id_stream0 : total_cores -1;
+
     for (unsigned core = start_core; core <= end_core; core++) {
       core_range.insert(core);
       core_stream_mapping[core] = stream_id;
@@ -2329,11 +2600,8 @@ void gpgpu_sim::gpu_print_stat(unsigned long long streamID) {
     }
   }
 
-  if (m_config.get_stream_partitioning() &&
-      !m_config.get_dynamic_core_scheduling()) {
-    m_shader_stats->print_ipc(stdout);
-  }
-
+  m_shader_stats->print_ipc(stdout);
+  
   printf("gpu_ipc = %12.4f\n", (float)gpu_sim_insn / gpu_sim_cycle);
   printf("gpu_tot_sim_cycle = %lld\n", gpu_tot_sim_cycle + gpu_sim_cycle);
   printf("gpu_tot_sim_insn = %lld\n", gpu_tot_sim_insn + gpu_sim_insn);
@@ -2723,6 +2991,7 @@ void shader_core_ctx::issue_block2core(kernel_info_t &kernel) {
   if (m_stats->shader_start_cycle[m_sid] == 0) {
     m_stats->shader_start_cycle[m_sid] = m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle;
     m_stats->shader_current_cycle[m_sid] = m_stats->shader_start_cycle[m_sid];
+    m_stats->shader_profile_cycle[m_sid] = m_stats->shader_start_cycle[m_sid];
     m_stats->m_num_sim_curr_kernel_insn[m_sid] = 0;
   }
 
@@ -2880,17 +3149,79 @@ void gpgpu_sim::issue_block2core() {
   }
 }
 
+void gpgpu_sim::issue_block2core_by_core_range() {
+  if (m_config.get_dynamic_core_scheduling() ||
+      m_config.get_dyno_core_scheduling()) {
+    for (auto& pair : global_dynamic_core_ranges_vector) {
+      unsigned streamID = pair.first;
+      std::vector<unsigned>& core_range = pair.second;
+      for (unsigned i = 0; i < core_range.size(); i++) {
+        unsigned core_id = get_next_core_id_by_core_range(streamID);
+        unsigned num = m_cluster[core_id]->issue_block2core();
+        if (num) {
+          if (streamID == 0) {
+            m_last_cluster_issue_stream1 = core_id;
+          } else if (streamID == 1) {
+            m_last_cluster_issue_stream2 = core_id;
+          } else {
+            assert(false && "Invalid stream id");
+          }
+          m_total_cta_launched += num;
+        }
+      }
+    }
+  } else {
+    for (auto& pair : global_stream_core_ranges_vector) {
+      unsigned streamID = pair.first;
+      std::vector<unsigned>& core_range = pair.second;
+      for (unsigned i = 0; i < core_range.size(); i++) {
+        unsigned core_id = get_next_core_id_by_core_range(streamID);
+        unsigned num = m_cluster[core_id]->issue_block2core();
+        if (num) {
+          if (streamID == 0) {
+            m_last_cluster_issue_stream1 = core_id;
+          } else if (streamID == 1) {
+            m_last_cluster_issue_stream2 = core_id;
+          } else {
+            assert(false && "Invalid stream id");
+          }
+          m_total_cta_launched += num;
+        }
+      }
+    }
+ }
+}
+
+
+/*
 
 void gpgpu_sim::issue_block2core_by_core_range() {
+  std::set<unsigned> stream0_core_ids;
+  std::set<unsigned> stream1_core_ids;
+
   for (unsigned i = 0; i < m_shader_config->n_simt_clusters; i++) {
     unsigned stream_id = core_stream_mapping[i];
     unsigned core_id = get_next_core_id_by_core_range(stream_id);
+    if (stream_id == 0) {
+      if (stream0_core_ids.find(core_id) != stream0_core_ids.end()) {
+        continue;
+      }
+    } else if (stream_id == 1) {
+      if (stream1_core_ids.find(core_id) != stream1_core_ids.end()) {
+        continue;
+      }
+    } else {
+      assert(false && "Invalid stream id");
+    }
+
     unsigned num = m_cluster[core_id]->issue_block2core();
     if (stream_id == 0 && num > 0) {
+      stream0_core_ids.insert(core_id);
       //std::cout << "STREAM 0: last issued " << m_last_cluster_issue_stream1 << " issue " << num << core_id << std::endl;
       m_last_cluster_issue_stream1 = core_id;
     } else if (stream_id == 1 && num > 0) {
-      std::cout << "STREAM 1: last issued " << m_last_cluster_issue_stream2 << " issue " << num << core_id << std::endl;
+      stream1_core_ids.insert(core_id);
+      //std::cout << "STREAM 1: last issued " << m_last_cluster_issue_stream2 << " issue " << num << core_id << std::endl;
       m_last_cluster_issue_stream2 = core_id;
     }
     if (num) {
@@ -2899,33 +3230,6 @@ void gpgpu_sim::issue_block2core_by_core_range() {
   }
 }
 
-/*
-void gpgpu_sim::issue_block2core_stream_partitioning() {
-  // Stream-based core partitioning: each stream gets its allocated core range
-  // We support up to 2 streams with dedicated core ranges
-  
-  unsigned last_issued_1 = m_last_cluster_issue_stream1;
-  for (unsigned i = 0; i < m_shader_config->n_simt_clusters/2; i++) {
-    unsigned idx = (i + last_issued_1 + 1) % (m_shader_config->n_simt_clusters/2);
-    unsigned num = m_cluster[idx]->issue_block2core();
-    if (num) {
-      m_last_cluster_issue_stream1 = idx;
-      m_total_cta_launched += num;
-    }
-  }
-
-  unsigned last_issued_2 = m_last_cluster_issue_stream2;
-  for (unsigned i = m_shader_config->n_simt_clusters/2;
-       i < m_shader_config->n_simt_clusters; i++) {
-    unsigned idx = (i + last_issued_2 + 1) % (m_shader_config->n_simt_clusters/2)
-                    + m_shader_config->n_simt_clusters/2;
-    unsigned num = m_cluster[idx]->issue_block2core();
-    if (num) {
-      m_last_cluster_issue_stream2 = idx;
-      m_total_cta_launched += num;
-    }
-  }
-}
 */
 
 unsigned long long g_single_step =
@@ -3077,7 +3381,8 @@ void gpgpu_sim::cycle() {
     }
 #endif
 
-  if (m_config.get_dynamic_core_scheduling()) {
+  if (m_config.get_dynamic_core_scheduling() ||
+      m_config.get_dyno_core_scheduling()) {
     issue_block2core_by_core_range();
   } else if (m_config.get_stream_partitioning()) {
     //issue_block2core_stream_partitioning();
@@ -3171,6 +3476,7 @@ void gpgpu_sim::cycle() {
       }
     }
 
+    // DEADLOCK DETECTION
     if (!(gpu_sim_cycle % 100000)) {
       // deadlock detection
       if (m_config.gpu_deadlock_detect && gpu_sim_insn == last_gpu_sim_insn) {

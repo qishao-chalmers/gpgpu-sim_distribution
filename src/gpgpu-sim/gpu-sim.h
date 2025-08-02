@@ -86,6 +86,9 @@ extern std::set<unsigned long long> global_unique_streams;
 
 extern std::map<unsigned,long long > stream_inst_count;
 
+extern bool is_policy_change;
+extern bool is_policy_change_done;
+
 // Policy performance statistics collection
 struct PolicyStats {
     double odd_ipc = 0.0;
@@ -564,6 +567,7 @@ class gpgpu_sim_config : public power_config,
 
   bool get_dynamic_core_scheduling() const { return gpgpu_dynamic_core_scheduling; }
 
+  bool get_dyno_core_scheduling() const { return gpgpu_dyno_core_scheduling; }
   /**
    * @brief Check if we are in SST mode
    *
@@ -637,6 +641,7 @@ class gpgpu_sim_config : public power_config,
   unsigned long long liveness_message_freq;
   bool gpgpu_stream_intlv_core;
   bool gpgpu_dynamic_core_scheduling;
+  bool gpgpu_dyno_core_scheduling;
 
   friend class gpgpu_sim;
   friend class sst_gpgpu_sim;
@@ -912,6 +917,18 @@ class gpgpu_sim : public gpgpu_t {
   unsigned profile_sample_count = 0;
 
   long long profile_cycle_threshold = 50000;
+
+  // check whether every 12 cores are collected info
+  std::bitset<12> collect_info_core_bitset;
+
+  std::bitset<2> collect_stream_bitset;
+
+  // core id and inst count
+  std::map<unsigned, unsigned> collect_info_core_inst_count;
+
+  // stream id and inst count
+  std::map<unsigned, unsigned> collect_info_stream_inst_count;
+
  public:
   unsigned long long gpu_sim_insn;
   unsigned long long gpu_tot_sim_insn;
@@ -950,6 +967,11 @@ class gpgpu_sim : public gpgpu_t {
   bool has_special_cache_config(std::string kernel_name);
   void change_cache_config(FuncCache cache_config);
   void set_cache_config(std::string kernel_name);
+
+  // dyno core scheduling sampling phase
+  void sampling_dyno_core_scheduling();
+  // dynamic core scheduling sampling phase
+  void sampling_dynamic_core_scheduling();
 
   void profile_kernel_stats(unsigned m_sid, double ipc, kernel_info_t *kernel);
   void dynamic_core_scheduling();

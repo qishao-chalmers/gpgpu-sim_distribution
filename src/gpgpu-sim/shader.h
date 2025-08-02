@@ -1434,7 +1434,7 @@ class ldst_unit : public pipelined_simd_unit {
   bool texture_cycle(warp_inst_t &inst, mem_stage_stall_type &rc_fail,
                      mem_stage_access_type &fail_type);
   bool memory_cycle(warp_inst_t &inst, mem_stage_stall_type &rc_fail,
-                    mem_stage_access_type &fail_type);
+                    mem_stage_access_type &fail_type, bool& inTransition);
 
   virtual mem_stage_stall_type process_cache_access(
       cache_t *cache, new_addr_type address, warp_inst_t &inst,
@@ -1739,9 +1739,11 @@ struct shader_core_stats_pod {
                                        // pointer to the start of this structure
   unsigned long long *shader_cycles;
   unsigned long long *shader_start_cycle;
+  unsigned long long *shader_profile_cycle;
   unsigned long long *shader_current_cycle;
   unsigned *m_num_sim_insn;   // number of scalar thread instructions committed
                               // by this shader core
+  unsigned *m_num_sim_insn_profile; // periodic clear and profile
   unsigned *m_num_sim_curr_kernel_insn;  // number of scalar thread instructions committed by this shader core
   unsigned *m_num_sim_winsn;  // number of warp instructions committed by this
                               // shader core
@@ -1848,10 +1850,16 @@ class shader_core_stats : public shader_core_stats_pod {
     shader_start_cycle = (unsigned long long *)calloc(config->num_shader(),
                                                  sizeof(unsigned long long));
     memset(shader_start_cycle, 0, config->num_shader() * sizeof(unsigned long long));
+
+    shader_profile_cycle = (unsigned long long *)calloc(config->num_shader(),
+                                                 sizeof(unsigned long long));
+    memset(shader_profile_cycle, 0, config->num_shader() * sizeof(unsigned long long));
     shader_current_cycle = (unsigned long long *)calloc(config->num_shader(),
                                                  sizeof(unsigned long long));
     memset(shader_current_cycle, 0, config->num_shader() * sizeof(unsigned long long));
     m_num_sim_insn = (unsigned *)calloc(config->num_shader(), sizeof(unsigned));
+    m_num_sim_insn_profile = (unsigned *)calloc(config->num_shader(), sizeof(unsigned));
+    memset(m_num_sim_insn_profile, 0, config->num_shader() * sizeof(unsigned));
     m_num_sim_curr_kernel_insn = (unsigned *)calloc(config->num_shader(), sizeof(unsigned));
     memset(m_num_sim_curr_kernel_insn, 0, config->num_shader() * sizeof(unsigned));
     m_num_sim_winsn =
@@ -1960,6 +1968,7 @@ class shader_core_stats : public shader_core_stats_pod {
     delete m_outgoing_traffic_stats;
     delete m_incoming_traffic_stats;
     free(m_num_sim_insn);
+    free(m_num_sim_insn_profile);
     free(m_num_sim_winsn);
     free(m_num_FPdecoded_insn);
     free(m_num_INTdecoded_insn);
@@ -2026,6 +2035,20 @@ class shader_core_stats : public shader_core_stats_pod {
       return double(m_num_sim_insn[core_id]) /
       double(shader_current_cycle[core_id] - shader_start_cycle[core_id]);    
     }
+  }
+
+  double get_ipc_profile(unsigned core_id) const {
+    if (shader_current_cycle[core_id] == shader_start_cycle[core_id]) {
+      return 0;
+    } else {
+      return double(m_num_sim_insn_profile[core_id]) /
+      double(shader_current_cycle[core_id] - shader_start_cycle[core_id]);    
+    }
+  }
+
+  void reset_m_num_sim_insn_profile(unsigned core_id, unsigned long long cycle) {
+    m_num_sim_insn_profile[core_id] = 0;
+    shader_profile_cycle[core_id] = cycle;
   }
 
   const std::vector<std::vector<unsigned>> &get_dynamic_warp_issue() const {
@@ -2669,41 +2692,73 @@ class shader_core_ctx : public core_t {
 
   void set_stream_bypassL1D(unsigned stream_id, bool bypass) {
     if (stream_id == 0) {
-      gmem_skip_L1D_stream0_init = bypass;
+      gmem_skip_L1D_stream0_old = bypass;
     } else if (stream_id == 1) {
-      gmem_skip_L1D_stream1_init = bypass;
+      gmem_skip_L1D_stream1_old = bypass;
     } else {
       assert(false && "Invalid stream id");
     }
+  }
+
+  void copy_stream_bypassL1D_new_to_old() {
+    gmem_skip_L1D_stream0_old = gmem_skip_L1D_stream0_new;
+    gmem_skip_L1D_stream1_old = gmem_skip_L1D_stream1_new;
   }
 
   void set_stream_bypassL1D_new(unsigned stream_id, bool bypass) {
     if (stream_id == 0) {
       gmem_skip_L1D_stream0_new = bypass;
+
+      //if (gmem_skip_L1D_stream0_init!=gmem_skip_L1D_stream0_new)
+      //  printf("GPGPU-Sim uArch: Shader %d stream0 bypassL1D changed from %d to %d\n",
+      //  get_sid(), gmem_skip_L1D_stream0_init, gmem_skip_L1D_stream0_new);
     } else if (stream_id == 1) {
       gmem_skip_L1D_stream1_new = bypass;
+
+      //if (gmem_skip_L1D_stream1_init!=gmem_skip_L1D_stream1_new)
+      //  printf("GPGPU-Sim uArch: Shader %d stream1 bypassL1D changed from %d to %d\n",
+      //  get_sid(), gmem_skip_L1D_stream1_init, gmem_skip_L1D_stream1_new);
     } else {
       assert(false && "Invalid stream id");
     }
   }
 
+/*
+  // i want to know the deadlock is due to core or bypass
   bool get_stream_bypassL1D(unsigned stream_id) const {
     if (stream_id == 0) {
-      if (transition_done) {
-        return gmem_skip_L1D_stream0_new;
-      } else {
         return gmem_skip_L1D_stream0_init;
-      }
     } else if (stream_id == 1) {
-      if (transition_done) {
-        return gmem_skip_L1D_stream1_new;
-      } else {
-        return gmem_skip_L1D_stream1_init;
-      }
+      return gmem_skip_L1D_stream1_init;
     } else {
       assert(false && "Invalid stream id");
     }
   }
+*/
+
+  bool get_stream_bypassL1D(unsigned stream_id) const {
+    if (stream_id == 0) {
+      if (transition_done) {
+        //if (gmem_skip_L1D_stream0_init!=gmem_skip_L1D_stream0_new)
+        //printf("GPGPU-Sim uArch: Shader %d stream0 bypassL1D using from %d to %d\n",
+        //get_sid(), gmem_skip_L1D_stream0_init, gmem_skip_L1D_stream0_new);
+        return gmem_skip_L1D_stream0_new;
+      } else {
+        return gmem_skip_L1D_stream0_old;
+      }
+    } else if (stream_id == 1) {
+      if (transition_done) {
+        //if (gmem_skip_L1D_stream1_init!=gmem_skip_L1D_stream1_new)
+        //printf("GPGPU-Sim uArch: Shader %d stream1 bypassL1D using from %d to %d\n",
+        //get_sid(), gmem_skip_L1D_stream1_init, gmem_skip_L1D_stream1_new);
+        return gmem_skip_L1D_stream1_new;
+      } else {
+        return gmem_skip_L1D_stream1_old;
+      }
+    } else {
+      assert(false && "Invalid stream id");
+    }
+}
 
   void info_transition_done();
 
@@ -2716,8 +2771,8 @@ class shader_core_ctx : public core_t {
   std::map<unsigned int, unsigned int> m_occupied_cta_to_hwtid;
   bool bypassL1D = false;
 
-  bool gmem_skip_L1D_stream0_init = false;
-  bool gmem_skip_L1D_stream1_init = false;
+  bool gmem_skip_L1D_stream0_old = false;
+  bool gmem_skip_L1D_stream1_old = false;
 
   bool gmem_skip_L1D_stream0_new = false;
   bool gmem_skip_L1D_stream1_new = false;
@@ -2727,7 +2782,7 @@ public:
   bool transition_done = false;
 
   unsigned transition_count = 0;
-  unsigned transition_count_threshold = 10000;
+  unsigned transition_count_threshold = 400;
 };
 
 class exec_shader_core_ctx : public shader_core_ctx {

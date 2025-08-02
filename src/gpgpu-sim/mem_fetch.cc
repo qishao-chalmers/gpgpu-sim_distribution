@@ -86,6 +86,13 @@ mem_fetch::mem_fetch(const mem_access_t &access, const warp_inst_t *inst,
   if (inst) {
     is_bypassL1D = inst->get_bypassL1D();
   }
+
+  if (original_mf) {
+    is_bypassL1D = original_mf->get_bypassL1D();
+  }
+  if (original_wr_mf) {
+    is_bypassL1D = original_wr_mf->get_bypassL1D();
+  }
 }
 
 mem_fetch::~mem_fetch() { m_status = MEM_FETCH_DELETED; }

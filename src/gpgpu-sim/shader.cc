@@ -1967,9 +1967,11 @@ void shader_core_ctx::warp_inst_complete(const warp_inst_t &inst) {
   if (m_config->gpgpu_clock_gated_lanes == false) {
     m_stats->m_num_sim_insn[m_sid] += m_config->warp_size;
     m_stats->m_num_sim_curr_kernel_insn[m_sid] += m_config->warp_size;
+    m_stats->m_num_sim_insn_profile[m_sid] += m_config->warp_size;
   } else {
     m_stats->m_num_sim_insn[m_sid] += inst.active_count();
     m_stats->m_num_sim_curr_kernel_insn[m_sid] += inst.active_count();
+    m_stats->m_num_sim_insn_profile[m_sid] += inst.active_count();
   }
 
   m_stats->shader_current_cycle[m_sid] = m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle;
@@ -2369,24 +2371,8 @@ bool ldst_unit::texture_cycle(warp_inst_t &inst, mem_stage_stall_type &rc_fail,
 
 bool ldst_unit::memory_cycle(warp_inst_t &inst,
                              mem_stage_stall_type &stall_reason,
-                             mem_stage_access_type &access_type) {
-  /*
-  if (m_core->start_transition &&!m_core->transition_done) {
-    if (m_core->transition_count == 0) {
-      printf("Transition started, transition_count: %d time: %lld\n",
-      m_core->transition_count, m_core->get_gpu()->gpu_sim_cycle);
-    }
-    m_core->transition_count++;
-    if (m_core->transition_count > m_core->transition_count_threshold) {
-      m_core->transition_done = true;
-      printf("Transition done, transition_count: %d time: %lld\n",
-      m_core->transition_count, m_core->get_gpu()->gpu_sim_cycle);
-
-      m_core->info_transition_done();
-    }
-  }
-  */
-
+                             mem_stage_access_type &access_type,
+                             bool& inTransition) {
   if (inst.empty() || ((inst.space.get_type() != global_space) &&
                        (inst.space.get_type() != local_space) &&
                        (inst.space.get_type() != param_space_local)))
@@ -2394,19 +2380,19 @@ bool ldst_unit::memory_cycle(warp_inst_t &inst,
   if (inst.active_count() == 0) return true;
   if (inst.accessq_empty()) return true;
 
-
   // wait for transition to be done
   if (m_core->start_transition && !m_core->transition_done) {
     if (!inst.isIssued()) {
       stall_reason = TRANSITION_STALL;
+      inTransition = true;
+      printf("Transition is not done, but inst is not issued, time: %lld total_sim_cycle: %lld\n",
+        m_core->get_gpu()->gpu_sim_cycle, m_core->get_gpu()->gpu_tot_sim_cycle);
       return false;
     }
-    /*
     else {
-      printf("Transition is not done, but inst is issued, time: %lld\n",
-      m_core->get_gpu()->gpu_sim_cycle);
+      printf("Transition is not done, but inst is issued, time: %lld total_sim_cycle: %lld\n",
+      m_core->get_gpu()->gpu_sim_cycle, m_core->get_gpu()->gpu_tot_sim_cycle);
     }
-    */
   }
 
   mem_stage_stall_type stall_cond = NO_RC_FAIL;
@@ -3077,11 +3063,12 @@ void ldst_unit::cycle() {
               //}
           //}
           else if ((m_core->get_config()->gmem_skip_L1D_stream0 || mf->get_bypassL1D())
+          //else if ((m_core->get_config()->gmem_skip_L1D_stream0 || m_core->get_stream_bypassL1D(0))
                 && (mf->get_streamID() == 0) && (CACHE_L1 != mf->get_inst().cache_op))
           bypassL1D = true;
           // if inst is from stream 0, skip L1 cache if the option is enabled
-          else if ((m_core->get_config()->gmem_skip_L1D_stream1 || m_core->get_stream_bypassL1D(1))
-          //else if ((m_core->get_config()->gmem_skip_L1D_stream1 || mf->get_bypassL1D())
+          //else if ((m_core->get_config()->gmem_skip_L1D_stream1 || m_core->get_stream_bypassL1D(1))
+          else if ((m_core->get_config()->gmem_skip_L1D_stream1 || mf->get_bypassL1D())
                 && (mf->get_streamID() == 1) && (CACHE_L1 != mf->get_inst().cache_op))
           bypassL1D = true;
         }
@@ -3115,16 +3102,22 @@ void ldst_unit::cycle() {
   enum mem_stage_stall_type rc_fail = NO_RC_FAIL;
   mem_stage_access_type type;
   bool done = true;
+  bool inTransition = false;
   done &= shared_cycle(pipe_reg, rc_fail, type);
   done &= constant_cycle(pipe_reg, rc_fail, type);
   done &= texture_cycle(pipe_reg, rc_fail, type);
-  done &= memory_cycle(pipe_reg, rc_fail, type);
+  done &= memory_cycle(pipe_reg, rc_fail, type, inTransition);
   m_mem_rc = rc_fail;
 
   if (!done && rc_fail != TRANSITION_STALL) {  // log stall types and return
     assert(rc_fail != NO_RC_FAIL);
     m_stats->gpgpu_n_stall_shd_mem++;
     m_stats->gpu_stall_shd_mem_breakdown[type][rc_fail]++;
+    return;
+  }
+
+  if (inTransition) {
+    assert(!done);
     return;
   }
 
@@ -3601,7 +3594,7 @@ void ldst_unit::print(FILE *fout) const {
   fprintf(fout, "LD/ST unit  = ");
   m_dispatch_reg->print(fout);
   if (m_mem_rc != NO_RC_FAIL) {
-    fprintf(fout, "              LD/ST stall condition: ");
+    fprintf(fout, "LD/ST stall condition: ");
     switch (m_mem_rc) {
       case BK_CONF:
         fprintf(fout, "BK_CONF");
@@ -3623,6 +3616,9 @@ void ldst_unit::print(FILE *fout) const {
         break;
       case N_MEM_STAGE_STALL_TYPE:
         fprintf(fout, "N_MEM_STAGE_STALL_TYPE");
+        break;
+      case TRANSITION_STALL:
+        fprintf(fout, "TRANSITION_STALL");
         break;
       default:
         abort();
@@ -3905,6 +3901,20 @@ void shader_core_config::set_pipeline_latency() {
 }
 
 void shader_core_ctx::cycle() {
+  if (start_transition &&!transition_done) {
+    if (transition_count == 0) {
+      printf("Transition started, transition_count: %d time: %lld\n",
+      transition_count, get_gpu()->gpu_sim_cycle);
+    }
+    transition_count++;
+    if (transition_count > transition_count_threshold) {
+      transition_done = true;
+      //printf("Transition done, transition_count: %d time: %lld total_sim_cycle: %lld\n",
+      //transition_count, get_gpu()->gpu_sim_cycle, get_gpu()->gpu_tot_sim_cycle);
+
+      info_transition_done();
+    }
+  }
   if (!isactive() && get_not_completed() == 0) return;
 
   m_stats->shader_cycles[m_sid]++;
@@ -4851,9 +4861,10 @@ unsigned simt_core_cluster::issue_block2core() {
             //    k ? k->name().c_str() : "NULL", k->get_streamID(), core,
             //    m_core[core]->get_sid());
             m_core[core]->set_kernel(k);
-            printf("GPGPU-Sim uArch: Shader ID %d bind to kernel %u \'%s\' stream %lld gpu_sim_cycle %lld\n",
-              m_core[core]->get_sid(), k->get_uid(), k->name().c_str(), k->get_streamID(),
-              m_gpu->gpu_sim_cycle+m_gpu->gpu_tot_sim_cycle);
+            printf("GPGPU-Sim uArch: Shader ID %d bypassL1D %d bind to kernel %u \'%s\' stream %lld gpu_sim_cycle %lld total_sim_cycle %lld\n",
+              m_core[core]->get_sid(), m_core[core]->get_stream_bypassL1D(k->get_streamID()),
+              k->get_uid(), k->name().c_str(), k->get_streamID(),
+              m_gpu->gpu_sim_cycle, m_gpu->gpu_tot_sim_cycle);
           }
           /*
           else {
@@ -4895,7 +4906,7 @@ unsigned simt_core_cluster::issue_block2core() {
       m_core[core]->can_issue_1block(*kernel)) {
       m_core[core]->issue_block2core(*kernel);
       // core Id and kernel name and sim cycle
-      //printf("core %u, kernel %s, streamId %lld, cycle %llu\n", core,
+      //printf("issue_block2core core %u, kernel %s, streamId %lld, cycle %llu\n", core,
       //       kernel->name().c_str(),kernel->get_streamID(), m_gpu->gpu_sim_cycle);
       num_blocks_issued++;
       m_cta_issue_next_core = core;
